@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# 临时与中间产物
+临时文件/
+
+# 生成输出
+电化学数据处理/output/
+电化学数据处理/LSV/output/
+
+# 大体积原始数据（按需再放开）
+RuO2/SEM/
+RuO2/汇报ppt/

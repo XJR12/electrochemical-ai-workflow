@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Generate LSV comparison figures.
+
+Usage:
+    python lsv_compare.py --input-dir <data folder>
+    python lsv_compare.py --input-dir <data folder> --pick "3% low 1mg=4-LSV_C01.txt"
+
+Outputs (in 对比图/):
+- LSV.png / IR.png: best raw / best iR curve of every group
+- 对比-<token>.png / 对比-<token>-iR.png: automatic groups by condition words
+  in folder names (tokens shared by >=2 folders, constants skipped)
+- 对比-<name>.png: optional manual groups from config compare.manual_groups
+- 选择说明.txt: which curves were excluded or need manual review
+
+Best-curve rule: candidates within gap_mv on eta10, then pick lowest eta100;
+if the eta10 gap to the second candidate is larger than gap_mv, the curve is
+marked for manual review (best-by-eta10 is still used until --pick is given).
+Very bad samples (eta10 > group median + exclude_mv) are excluded automatically.
+"""
+
+import argparse
+import math
+import os
+import statistics
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import yaml
+
+from lsv_analysis import clean_forward_sweep, group_kind, potential_at_current, read_lsv
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+COMPARE_DEFAULTS = {
+    "gap_mv": 5.0,
+    "exclude_mv": 100.0,
+    "majority_ratio": 0.5,
+    "x_end_pad": 0.01,
+    "manual_groups": [],
+}
+
+
+def load_config(path):
+    cfg = {}
+    if path and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+    compare = {**COMPARE_DEFAULTS, **(cfg.get("compare") or {})}
+    return cfg, compare
+
+
+def parse_all(paths, area, rhe, targets):
+    parsed = {}
+    for p in paths:
+        E, I, is_density = read_lsv(p)
+        E2, I2 = clean_forward_sweep(E, I)
+        if len(E2) < 3:
+            continue
+        j = I2 if is_density else [v / area for v in I2]
+        t = {x: potential_at_current(E2, j, x) for x in targets}
+        parsed[p] = {
+            "path": p,
+            "folder": os.path.basename(os.path.dirname(p)),
+            "kind": group_kind(p),
+            "targets": t,
+            "eta10": None if t[targets[0]] is None else (t[targets[0]] - rhe) * 1000.0,
+            "eta100": None if t[targets[1]] is None else (t[targets[1]] - rhe) * 1000.0,
+            "E100": t[targets[1]],
+            "maxE": max(E2),
+            "E": E2,
+            "j": j,
+        }
+    return parsed
+
+
+def select_best(entries, pick_map, gap_mv):
+    """Return (best_entry, needs_review, candidates)."""
+    folder = entries[0]["folder"]
+    if folder in pick_map:
+        for e in entries:
+            if os.path.basename(e["path"]) == pick_map[folder]:
+                return e, False, entries
+    valid = [e for e in entries if e["eta10"] is not None]
+    if not valid:
+        return entries[0], False, entries
+    sorted_valid = sorted(valid, key=lambda e: e["eta10"])
+    best_eta10 = sorted_valid[0]["eta10"]
+    second = sorted_valid[1]["eta10"] if len(sorted_valid) > 1 else best_eta10
+    needs_review = (second - best_eta10) > gap_mv
+    candidates = [e for e in sorted_valid if (e["eta10"] - best_eta10) <= gap_mv]
+    with100 = [e for e in candidates if e["eta100"] is not None]
+    pool = with100 if with100 else candidates
+    best = min(pool, key=lambda e: e["eta100"] if e["eta100"] is not None else e["eta10"])
+    return best, needs_review, sorted_valid
+
+
+def exclude_bad(curves, exclude_mv):
+    etas = sorted(c["eta10"] for c in curves if c["eta10"] is not None)
+    if len(curves) <= 1 or not etas:
+        return list(curves), []
+    median = statistics.median(etas)
+    keep = []
+    excluded = []
+    for c in curves:
+        if c["eta10"] is not None and (c["eta10"] - median) > exclude_mv:
+            excluded.append(c)
+        else:
+            keep.append(c)
+    return keep, excluded
+
+
+def decide_axis(curves, majority_ratio):
+    if not curves:
+        return "10", 1.4
+    reached = sum(1 for c in curves if c["eta100"] is not None)
+    mode = "100" if reached / len(curves) >= majority_ratio else "10"
+    if mode == "100":
+        pool = [c for c in curves if c["E100"] is not None] or curves
+        x_end = max(c["E100"] for c in pool) + 0.01
+    else:
+        x_end = min(c["maxE"] for c in curves)
+    x_end = math.ceil(x_end * 100.0 - 1e-9) / 100.0
+    return mode, x_end
+
+
+def label_of(folder):
+    return folder.replace(" ", "-")
+
+
+def save_figure(curves, kind, out_name, out_dir, cfg, mode, x_end, notes):
+    x_min = cfg.get("axis", {}).get("x_min", 1.4)
+    y_max = 100.0 if mode == "100" else 10.0
+    fig, ax = plt.subplots(figsize=cfg.get("figure", {}).get("figsize", [8.0, 6.0]),
+                           dpi=cfg.get("figure", {}).get("dpi", 600))
+    for c in curves:
+        ax.plot(c["E"], c["j"], linewidth=cfg.get("curve", {}).get("linewidth", 2.0),
+                marker=cfg.get("curve", {}).get("marker", "none"),
+                label=label_of(c["folder"]))
+    ax.set_xlim(x_min, x_end)
+    ax.set_ylim(0, y_max)
+    ax.set_xlabel(cfg.get("axis", {}).get("xlabel", "Potential (V vs. RHE)"), fontsize=12,
+                  fontweight=cfg.get("axis", {}).get("fontweight", "normal"))
+    ax.set_ylabel(cfg.get("axis", {}).get("ylabel", "Current density (mA·cm$^{-2}$)"), fontsize=12,
+                  fontweight=cfg.get("axis", {}).get("fontweight", "normal"))
+    ax.xaxis.set_major_locator(plt.MultipleLocator(0.05))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(0.025))
+    ax.xaxis.set_major_formatter(plt.FormatStrFormatter("%.2f"))
+    ax.legend(loc=cfg.get("legend", {}).get("loc", "upper left"),
+              fontsize=cfg.get("legend", {}).get("fontsize", 10),
+              frameon=True, edgecolor="black")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, out_name)
+    fig.savefig(out_path, dpi=cfg.get("figure", {}).get("dpi", 600),
+                bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    notes.append("生成：%s（y轴0-%.0f，x轴%.2f-%.2f）" % (out_name, y_max, x_min, x_end))
+    return out_path
+
+
+def build_figure(entries, kind, out_name, out_dir, cfg, compare, notes, pick_map):
+    curves, review = [], []
+    for folder in sorted(entries):
+        best, needs, candidates = select_best(entries[folder], pick_map, compare["gap_mv"])
+        curves.append(best)
+        if needs:
+            review.append("需人工确认 %s / %s：eta10 差距 > %.1f mV，候选：" % (folder, kind, compare["gap_mv"]))
+            for c in candidates:
+                review.append("    %s | eta10=%.1f mV | eta100=%s" % (
+                    os.path.basename(c["path"]), c["eta10"],
+                    "N/A" if c["eta100"] is None else "%.1f mV" % c["eta100"]))
+    curves, excluded = exclude_bad(curves, compare["exclude_mv"])
+    if excluded:
+        notes.append("剔除（%s）：%s" % (kind, ", ".join(label_of(c["folder"]) for c in excluded)))
+    if len(curves) < 2:
+        notes.append("跳过：%s（剩余曲线不足 2 条）" % out_name)
+        return None
+    mode, x_end = decide_axis(curves, compare["majority_ratio"])
+    return save_figure(curves, kind, out_name, out_dir, cfg, mode, x_end, notes)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="LSV 对比图")
+    parser.add_argument("--input-dir", required=True, help="数据目录")
+    parser.add_argument("--output-dir", default=os.path.join(SCRIPT_DIR, "output", "对比图"), help="输出目录")
+    parser.add_argument("--config", default=os.path.join(SCRIPT_DIR, "config.yaml"))
+    parser.add_argument("--area", type=float, default=1.0)
+    parser.add_argument("--rhe", type=float, default=1.23)
+    parser.add_argument("--targets", nargs="+", type=float, default=[10.0, 100.0])
+    parser.add_argument("--gap-mv", type=float, default=None)
+    parser.add_argument("--exclude-mv", type=float, default=None)
+    parser.add_argument("--majority-ratio", type=float, default=None)
+    parser.add_argument("--pick", nargs="+", default=[], help="文件夹=文件名，如 \"3% low 1mg=4-LSV_C01.txt\"")
+    args = parser.parse_args(argv)
+
+    args.input_dir = os.path.abspath(args.input_dir)
+    args.output_dir = os.path.abspath(args.output_dir)
+    args.config = os.path.abspath(args.config)
+
+    cfg, compare = load_config(args.config)
+    if args.gap_mv is not None:
+        compare["gap_mv"] = args.gap_mv
+    if args.exclude_mv is not None:
+        compare["exclude_mv"] = args.exclude_mv
+    if args.majority_ratio is not None:
+        compare["majority_ratio"] = args.majority_ratio
+    if "font" in cfg.get("figure", {}):
+        plt.rcParams["font.family"] = cfg["figure"]["font"]
+
+    pick_map = {}
+    for item in args.pick:
+        if "=" in item:
+            f, fn = item.split("=", 1)
+            pick_map[f] = fn
+
+    paths = []
+    for root, _, names in os.walk(args.input_dir):
+        for name in sorted(names):
+            if name.lower().endswith(".txt"):
+                paths.append(os.path.join(root, name))
+    if not paths:
+        parser.error("没有输入文件")
+
+    parsed = parse_all(paths, args.area, args.rhe, args.targets)
+
+    best = {}
+    for p, info in parsed.items():
+        key = (info["folder"], info["kind"])
+        best.setdefault(key, []).append(info)
+
+    notes = []
+    out_dir = args.output_dir
+
+    # total figures
+    for kind, total_name in (("raw", "LSV.png"), ("ir", "IR.png")):
+        entries = {}
+        for (folder, k), lst in best.items():
+            if k == kind:
+                entries[folder] = lst
+        build_figure(entries, kind, total_name, out_dir, cfg, compare, notes, pick_map)
+
+    # automatic token groups
+    all_folders = sorted(set(f for f, k in best))
+    tokens = {}
+    for f in all_folders:
+        for tok in f.split():
+            tokens.setdefault(tok, set()).add(f)
+    for kind in ("raw", "ir"):
+        kind_folders = sorted(set(f for (f, k) in best if k == kind))
+        for tok in sorted(tokens):
+            members = [f for f in tokens[tok] if f in kind_folders]
+            if len(members) < 2 or len(members) == len(kind_folders):
+                continue
+            entries = {f: best[(f, kind)] for f in members}
+            name = "对比-%s.png" % tok if kind == "raw" else "对比-%s-iR.png" % tok
+            build_figure(entries, kind, name, out_dir, cfg, compare, notes, pick_map)
+
+    # manual groups from config
+    for g in compare.get("manual_groups") or []:
+        gname = g.get("name", "manual")
+        folders = g.get("folders", [])
+        for kind, suffix in (("raw", ".png"), ("ir", "-iR.png")):
+            members = [f for f in folders if (f, kind) in best]
+            if len(members) < 2:
+                continue
+            entries = {f: best[(f, kind)] for f in members}
+            name = "对比-%s%s" % (gname, suffix)
+            build_figure(entries, kind, name, out_dir, cfg, compare, notes, pick_map)
+
+    note_path = os.path.join(out_dir, "选择说明.txt")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(note_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(notes) + "\n")
+    for line in notes:
+        print(line)
+    print("说明已写入：%s" % note_path)
+
+
+if __name__ == "__main__":
+    main()
