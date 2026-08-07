@@ -1,0 +1,7 @@
+matplotlib
+pyyaml
+pdfplumber
+pypdf
+numpy
+pillow
+reportlab

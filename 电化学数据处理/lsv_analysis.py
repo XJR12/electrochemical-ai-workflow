@@ -88,15 +88,24 @@ def read_lsv(path):
     return E, I, current_is_density
 
 
-def clean_forward_sweep(E, I):
-    """Keep only the forward sweep: start at minimum potential, then strictly increasing E."""
+def clean_forward_sweep(E, I, e_min=1.3):
+    """Keep only the forward sweep: drop pre-scan idle points below e_min,
+    then start at the minimum remaining potential and keep strictly increasing E."""
     if not E:
         return [], []
-    start = min(range(len(E)), key=lambda k: E[k])
+    E0 = []
+    I0 = []
+    for e, i in zip(E, I):
+        if e >= e_min:
+            E0.append(e)
+            I0.append(i)
+    if not E0:
+        return [], []
+    start = min(range(len(E0)), key=lambda k: E0[k])
     E2 = []
     I2 = []
     last = -math.inf
-    for e, i in zip(E[start:], I[start:]):
+    for e, i in zip(E0[start:], I0[start:]):
         if e > last:
             E2.append(e)
             I2.append(i)
@@ -105,15 +114,19 @@ def clean_forward_sweep(E, I):
 
 
 def potential_at_current(E, j, target):
-    """Linear interpolation of E where current density j crosses target."""
+    """Linear interpolation of E where current density j first rises across target.
+
+    Only a rising pair (previous below/equal, current at/above) is accepted,
+    so a pre-scan transient that starts above the target is skipped.
+    """
     if len(E) < 2:
         return None
-    for k in range(len(E)):
-        if j[k] >= target:
-            if k == 0:
-                return None
+    for k in range(1, len(E)):
+        if j[k - 1] <= target <= j[k]:
             j0 = j[k - 1]
             j1 = j[k]
+            if j0 == target:
+                return E[k - 1]
             if j1 == j0:
                 return E[k]
             ratio = (target - j0) / (j1 - j0)
@@ -148,6 +161,52 @@ KIND_LABEL = {"raw": "直接测", "ir": "iR补偿"}
 SELECTION_LABEL = {"auto": "自动", "manual": "手动", "picked": "指定"}
 
 
+def dominates(a, b):
+    """True if curve a is strictly better than b in eta10/eta100 (lower is better)."""
+    def cmp(x, y):
+        if x is None and y is None:
+            return 0
+        if x is None:
+            return 1
+        if y is None:
+            return -1
+        if x < y:
+            return -1
+        if x > y:
+            return 1
+        return 0
+    r10 = cmp(a["eta10"], b["eta10"])
+    r100 = cmp(a["eta100"], b["eta100"])
+    return (r10 <= 0 and r100 <= 0) and (r10 < 0 or r100 < 0)
+
+
+def write_summary_md(output_dir, best_rows, targets, rhe):
+    by_folder = {}
+    for r in best_rows:
+        if r.get("selection") in ("auto", "picked"):
+            by_folder.setdefault(r["folder"], {})[r["kind"]] = r
+    lines = [
+        "| 样品 | LSV（η10/η100） | iR后（η10/η100） |",
+        "| --- | --- | --- |",
+    ]
+    for folder in sorted(by_folder):
+        def cell(kind):
+            r = by_folder[folder].get(kind)
+            if r is None:
+                return "-"
+            e10 = eta_mv(r["targets"].get(targets[0]), rhe)
+            e100 = eta_mv(r["targets"].get(targets[1]), rhe)
+            return "%s / %s" % (
+                "-" if e10 is None else ("%.1f" % e10),
+                "-" if e100 is None else ("%.1f" % e100),
+            )
+        lines.append("| %s | %s | %s |" % (folder, cell("raw"), cell("ir")))
+    md_path = os.path.join(output_dir, "数据对比.md")
+    with open(md_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print("已生成：%s" % md_path)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="LSV 过电位自动识别")
     parser.add_argument("files", nargs="*", help="LSV txt 文件")
@@ -157,9 +216,9 @@ def main(argv=None):
     parser.add_argument("--targets", nargs="+", type=float, default=[10.0, 100.0], help="目标电流密度 mA/cm2")
     parser.add_argument("--output-dir", help="输出 CSV 的目录")
     parser.add_argument("--no-best", action="store_true", help="跳过最优曲线选择")
-    parser.add_argument("--pick", help="指定文件（文件名）作为该组最优曲线")
+    parser.add_argument("--pick", nargs="+", default=[], help="目录=文件名，可指定多个")
     parser.add_argument("--eta10-gap", type=float, default=5.0, help="eta10 与次优差距超过该值（mV）时不自动选")
-    parser.add_argument("--sanity-mv", type=float, default=-50.0, help="过电位低于该值（mV）视为异常曲线")
+    parser.add_argument("--sanity-mv", type=float, default=0.0, help="过电位低于该值（mV）视为异常曲线")
     args = parser.parse_args(argv)
 
     if args.input_dir:
@@ -205,6 +264,8 @@ def main(argv=None):
             "targets": targets,
             "max_j": max(j) if j else 0.0,
             "invalid": invalid,
+            "eta10": None if targets[args.targets[0]] is None else (targets[args.targets[0]] - args.rhe) * 1000.0,
+            "eta100": None if targets[args.targets[1]] is None else (targets[args.targets[1]] - args.rhe) * 1000.0,
         })
 
     results.sort(key=lambda r: (r["folder"], 0 if r["kind"] == "raw" else 1, os.path.basename(r["path"])))
@@ -228,50 +289,45 @@ def main(argv=None):
         for r in results:
             groups.setdefault((r["folder"], r["kind"]), []).append(r)
 
-        pick_basename = os.path.basename(args.pick) if args.pick else None
+        pick_map = {}
+        for item in args.pick:
+            if "=" in item:
+                folder, filename = item.split("=", 1)
+                pick_map[folder] = filename
         best_rows = []
         for key, group in groups.items():
             pool = [r for r in group if not r.get("invalid")]
             if not pool:
                 pool = group
             scored = sorted(pool, key=lambda r: best_score(r, args.targets) if best_score(r, args.targets) is not None else 1e9)
+            surviving = [c for c in scored if not any(dominates(o, c) for o in scored)]
 
             selected = None
             chosen_by_pick = False
-            if pick_basename:
-                matches = [r for r in group if os.path.basename(r["path"]).lower() == pick_basename.lower()]
+            pick_name = pick_map.get(key[0])
+            if pick_name:
+                matches = [r for r in group if os.path.basename(r["path"]).lower() == pick_name.lower()]
                 if matches:
                     selected = matches[0]
                     chosen_by_pick = True
-                else:
-                    print("警告：--pick %s 在 %s / %s 中未找到，改用自动选择" % (pick_basename, key[0], key[1]))
 
-            if selected is None and len(scored) >= 2:
-                e0 = best_score(scored[0], args.targets)
-                e1 = best_score(scored[1], args.targets)
-                if e0 is not None and e1 is not None:
-                    gap = (e1 - e0) * 1000.0
-                    needs_review = gap > args.eta10_gap
-                    if needs_review:
-                        print("%s / %s：eta10 差距 %.1f mV > %.1f mV，需人工确认" % (key[0], key[1], gap, args.eta10_gap))
-                        for cand in scored:
-                            print("  候选：%s | 过电位10=%s mV | 过电位100=%s mV" % (
-                                os.path.basename(cand["path"]),
-                                format_float(eta_mv(cand["targets"].get(args.targets[0]), args.rhe)),
-                                format_float(eta_mv(cand["targets"].get(args.targets[1]), args.rhe))))
-                        if pick_basename is None:
-                            print("  未指定 --pick，暂按最低 eta10 选择，请核对")
-                    candidates = [c for c in scored if c["targets"].get(args.targets[0]) is not None
-                                  and (c["targets"][args.targets[0]] - e0) * 1000.0 <= args.eta10_gap]
-                    with100 = [c for c in candidates if c["targets"].get(args.targets[1]) is not None]
-                    pool = with100 if with100 else candidates
-                    selected = min(pool, key=lambda c: c["targets"][args.targets[1]] if c["targets"].get(args.targets[1]) is not None else c["targets"][args.targets[0]])
-                    selected["selection"] = "manual" if needs_review else "auto"
-                    best_rows.append(selected)
-                    continue
+
+            if selected is None and len(surviving) >= 2:
+                print("%s / %s：存在 %d 条互有优劣的曲线，需人工确认" % (key[0], key[1], len(surviving)))
+                for cand in surviving:
+                    print("  候选：%s | η10=%s mV | η100=%s mV" % (
+                        os.path.basename(cand["path"]),
+                        format_float(eta_mv(cand["targets"].get(args.targets[0]), args.rhe)),
+                        format_float(eta_mv(cand["targets"].get(args.targets[1]), args.rhe))))
+                if key[0] not in pick_map:
+                    print("  已在 CSV 中列出候选，请用 --pick <目录=文件名> 指定")
+                for cand in surviving:
+                    cand["selection"] = "manual"
+                    best_rows.append(cand)
+                continue
 
             if selected is None:
-                selected = scored[0]
+                selected = surviving[0] if surviving else scored[0]
             selected["selection"] = "picked" if chosen_by_pick else "auto"
             best_rows.append(selected)
 
@@ -296,22 +352,33 @@ def main(argv=None):
                     writer.writerow(row)
 
             best_path = os.path.join(args.output_dir, "lsv_best.csv")
-            best_header = header + ["选择方式"]
+            best_header = ["目录", "类别", "η10/mV", "η100/mV", "选择方式", "文件"]
             with open(best_path, "w", newline="", encoding="utf-8-sig") as fh:
                 writer = csv.writer(fh)
                 writer.writerow(best_header)
                 for r in best_rows:
-                    row = [r["folder"], os.path.basename(r["path"]), KIND_LABEL[r["kind"]], "异常" if r.get("invalid") else ""]
-                    for t in args.targets:
-                        e = r["targets"][t]
-                        row.append("" if e is None else ("%.4f" % e))
-                        row.append("" if e is None else ("%.1f" % eta_mv(e, args.rhe)))
-                    row.append(SELECTION_LABEL.get(r.get("selection", "auto"), "自动"))
+                    e10 = eta_mv(r["targets"].get(args.targets[0]), args.rhe)
+                    e100 = eta_mv(r["targets"].get(args.targets[1]), args.rhe)
+                    row = [
+                        r["folder"],
+                        KIND_LABEL[r["kind"]],
+                        "" if e10 is None else ("%.1f" % e10),
+                        "" if e100 is None else ("%.1f" % e100),
+                        SELECTION_LABEL.get(r.get("selection", "auto"), "自动"),
+                        os.path.basename(r["path"]),
+                    ]
                     writer.writerow(row)
             print("\nCSV 已写入 %s" % args.output_dir)
 
+            has_manual = any(r.get("selection") == "manual" for r in best_rows)
+            if has_manual:
+                print("存在手动候选，请先指定后再重跑。")
+                return 1
+            write_summary_md(args.output_dir, best_rows, args.targets, args.rhe)
+
     print("\n说明：电流列按总电流处理，已除以面积=%.2f cm2。" % args.area)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

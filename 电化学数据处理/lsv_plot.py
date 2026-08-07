@@ -138,7 +138,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="LSV 自动绘图")
     parser.add_argument("files", nargs="*", help="LSV txt 文件（可选）")
     parser.add_argument("--input-dir", help="递归扫描目录下的 *.txt")
-    parser.add_argument("--output-dir", default=os.path.join(SCRIPT_DIR, "output", "figures"), help="图片输出目录")
+    parser.add_argument("--output-dir", default=os.path.join(SCRIPT_DIR, "output", "样品"), help="图片输出目录")
     parser.add_argument("--config", default=os.path.join(SCRIPT_DIR, "config.yaml"), help="配置文件路径")
     parser.add_argument("--area", type=float, default=1.0, help="电极面积 cm2（默认 1.0）")
     parser.add_argument("--x-min", type=float, default=None, help="x 轴起点（默认读 config）")

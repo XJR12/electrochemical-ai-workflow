@@ -21,6 +21,7 @@ legend:
 
 compare:
   gap_mv: 5.0
+  sanity_mv: 0.0
   exclude_mv: 100.0
   majority_ratio: 0.5
   x_end_pad: 0.01
