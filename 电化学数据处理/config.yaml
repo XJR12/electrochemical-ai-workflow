@@ -26,3 +26,16 @@ compare:
   majority_ratio: 0.5
   x_end_pad: 0.01
   manual_groups: []
+
+tafel:
+  xlabel: "log(j / mA cm$^{-2}$)"
+  ylabel: "Overpotential $\\eta$ (mV)"
+  x_major_step: 1.0
+  x_minor_step: 0.5
+  y_major_step: 50.0
+  y_minor_step: 10.0
+  j_min: 1.0
+  j_max: null
+  eta_min: null
+  eta_max: null
+  fontweight: bold
