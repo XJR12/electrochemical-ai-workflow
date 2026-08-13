@@ -216,7 +216,7 @@ def main(argv=None):
     parser.add_argument("--targets", nargs="+", type=float, default=[10.0, 100.0], help="目标电流密度 mA/cm2")
     parser.add_argument("--output-dir", help="输出 CSV 的目录")
     parser.add_argument("--no-best", action="store_true", help="跳过最优曲线选择")
-    parser.add_argument("--pick", nargs="+", default=[], help="目录=文件名，可指定多个")
+    parser.add_argument("--pick", action="append", default=[], help="目录=文件名，或 目录#直接测=文件名 / 目录#iR补偿=文件名，可重复指定")
     parser.add_argument("--eta10-gap", type=float, default=5.0, help="eta10 与次优差距超过该值（mV）时不自动选")
     parser.add_argument("--sanity-mv", type=float, default=0.0, help="过电位低于该值（mV）视为异常曲线")
     args = parser.parse_args(argv)
@@ -271,16 +271,18 @@ def main(argv=None):
     results.sort(key=lambda r: (r["folder"], 0 if r["kind"] == "raw" else 1, os.path.basename(r["path"])))
 
     print("=== 逐文件结果 ===")
-    header = ["目录", "文件", "类别", "备注"]
+    header = ["类别", "目录", "文件"]
     for t in args.targets:
         header += ["电位%d/V" % t, "过电位%d/mV" % t]
+    header += ["备注"]
     print("\t".join(header))
     for r in results:
-        row = [r["folder"], os.path.basename(r["path"]), KIND_LABEL[r["kind"]], "异常" if r.get("invalid") else ""]
+        row = [KIND_LABEL[r["kind"]], r["folder"], os.path.basename(r["path"])]
         for t in args.targets:
             e = r["targets"][t]
             row.append(format_float(e))
             row.append(format_float(eta_mv(e, args.rhe)))
+        row.append("异常" if r.get("invalid") else "")
         print("\t".join(row))
 
     if not args.no_best:
@@ -291,9 +293,14 @@ def main(argv=None):
 
         pick_map = {}
         for item in args.pick:
-            if "=" in item:
-                folder, filename = item.split("=", 1)
-                pick_map[folder] = filename
+            if "=" not in item:
+                continue
+            folder, filename = item.split("=", 1)
+            kind = None
+            if "#" in folder:
+                folder, kind_label = folder.rsplit("#", 1)
+                kind = {"直接测": "raw", "iR补偿": "ir"}.get(kind_label)
+            pick_map[(folder, kind)] = filename
         best_rows = []
         for key, group in groups.items():
             pool = [r for r in group if not r.get("invalid")]
@@ -304,7 +311,9 @@ def main(argv=None):
 
             selected = None
             chosen_by_pick = False
-            pick_name = pick_map.get(key[0])
+            pick_name = pick_map.get(key)
+            if pick_name is None:
+                pick_name = pick_map.get((key[0], None))
             if pick_name:
                 matches = [r for r in group if os.path.basename(r["path"]).lower() == pick_name.lower()]
                 if matches:
@@ -319,8 +328,8 @@ def main(argv=None):
                         os.path.basename(cand["path"]),
                         format_float(eta_mv(cand["targets"].get(args.targets[0]), args.rhe)),
                         format_float(eta_mv(cand["targets"].get(args.targets[1]), args.rhe))))
-                if key[0] not in pick_map:
-                    print("  已在 CSV 中列出候选，请用 --pick <目录=文件名> 指定")
+                if not pick_name:
+                    print("  已在 CSV 中列出候选，请用 --pick <目录=文件名> 或 <目录#类别=文件名> 指定")
                 for cand in surviving:
                     cand["selection"] = "manual"
                     best_rows.append(cand)
@@ -344,15 +353,16 @@ def main(argv=None):
                 writer = csv.writer(fh)
                 writer.writerow(header)
                 for r in results:
-                    row = [r["folder"], os.path.basename(r["path"]), KIND_LABEL[r["kind"]], "异常" if r.get("invalid") else ""]
+                    row = [KIND_LABEL[r["kind"]], r["folder"], os.path.basename(r["path"])]
                     for t in args.targets:
                         e = r["targets"][t]
                         row.append("" if e is None else ("%.4f" % e))
                         row.append("" if e is None else ("%.1f" % eta_mv(e, args.rhe)))
+                    row.append("异常" if r.get("invalid") else "")
                     writer.writerow(row)
 
             best_path = os.path.join(args.output_dir, "lsv_best.csv")
-            best_header = ["目录", "类别", "η10/mV", "η100/mV", "选择方式", "文件"]
+            best_header = ["类别", "目录", "η10/mV", "η100/mV", "选择方式", "文件"]
             with open(best_path, "w", newline="", encoding="utf-8-sig") as fh:
                 writer = csv.writer(fh)
                 writer.writerow(best_header)
@@ -360,8 +370,8 @@ def main(argv=None):
                     e10 = eta_mv(r["targets"].get(args.targets[0]), args.rhe)
                     e100 = eta_mv(r["targets"].get(args.targets[1]), args.rhe)
                     row = [
-                        r["folder"],
                         KIND_LABEL[r["kind"]],
+                        r["folder"],
                         "" if e10 is None else ("%.1f" % e10),
                         "" if e100 is None else ("%.1f" % e100),
                         SELECTION_LABEL.get(r.get("selection", "auto"), "自动"),

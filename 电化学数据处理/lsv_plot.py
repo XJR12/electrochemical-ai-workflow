@@ -50,6 +50,7 @@ DEFAULTS = {
         "loc": "upper left",
         "fontsize": 10,
     },
+    "area": 1.0,
 }
 
 
@@ -59,10 +60,11 @@ def load_config(path):
             cfg = yaml.safe_load(fh) or {}
     else:
         cfg = {}
-    merged = DEFAULTS
+    merged = {**DEFAULTS}
     for section, values in cfg.items():
         if isinstance(values, dict):
             merged[section] = {**DEFAULTS.get(section, {}), **values}
+    merged["area"] = cfg.get("area", DEFAULTS.get("area", 1.0))
     return merged
 
 
@@ -140,7 +142,7 @@ def main(argv=None):
     parser.add_argument("--input-dir", help="递归扫描目录下的 *.txt")
     parser.add_argument("--output-dir", default=os.path.join(SCRIPT_DIR, "output", "样品"), help="图片输出目录")
     parser.add_argument("--config", default=os.path.join(SCRIPT_DIR, "config.yaml"), help="配置文件路径")
-    parser.add_argument("--area", type=float, default=1.0, help="电极面积 cm2（默认 1.0）")
+    parser.add_argument("--area", type=float, default=None, help="电极面积 cm2，默认读 config.yaml 的 area")
     parser.add_argument("--x-min", type=float, default=None, help="x 轴起点（默认读 config）")
     args = parser.parse_args(argv)
 
@@ -161,6 +163,8 @@ def main(argv=None):
         parser.error("没有输入文件")
 
     cfg = load_config(args.config)
+    if args.area is None:
+        args.area = cfg.get("area", 1.0)
     if "font" in cfg["figure"]:
         plt.rcParams["font.family"] = cfg["figure"]["font"]
 

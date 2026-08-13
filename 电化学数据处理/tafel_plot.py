@@ -57,6 +57,7 @@ DEFAULTS = {
         "loc": "upper left",
         "fontsize": 10,
     },
+    "area": 1.0,
 }
 
 
@@ -67,8 +68,12 @@ def load_config(path):
             cfg = yaml.safe_load(fh) or {}
     merged = {}
     for section, default in DEFAULTS.items():
+        if not isinstance(default, dict):
+            merged[section] = default
+            continue
         merged[section] = {**default, **(cfg.get(section) or {})}
     merged["compare"] = cfg.get("compare") or {}
+    merged["area"] = cfg.get("area", DEFAULTS.get("area", 1.0))
     return merged
 
 
@@ -387,7 +392,7 @@ def main(argv=None):
     parser.add_argument("--best-csv", help="LSV 已选好的 lsv_best.csv")
     parser.add_argument("--output-dir", default=os.path.join(SCRIPT_DIR, "output", "tafel"))
     parser.add_argument("--config", default=os.path.join(SCRIPT_DIR, "config.yaml"))
-    parser.add_argument("--area", type=float, default=1.0, help="电极面积 cm2（默认 1.0）")
+    parser.add_argument("--area", type=float, default=None, help="电极面积 cm2，默认读 config.yaml 的 area")
     parser.add_argument("--rhe", type=float, default=1.23, help="RHE 基准电位（默认 1.23）")
     parser.add_argument("--j-min", type=float, default=None, help="截取版电流下界")
     parser.add_argument("--j-max", type=float, default=None, help="截取版电流上界")
@@ -405,6 +410,8 @@ def main(argv=None):
         args.best_csv = os.path.abspath(args.best_csv)
 
     cfg = load_config(args.config)
+    if args.area is None:
+        args.area = cfg.get("area", 1.0)
     for key in ("j_min", "j_max", "eta_min", "eta_max"):
         value = getattr(args, key)
         if value is not None:

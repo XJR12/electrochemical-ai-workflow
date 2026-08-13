@@ -17,6 +17,8 @@ import os
 import re
 import sys
 
+import yaml
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
@@ -24,6 +26,15 @@ if SCRIPT_DIR not in sys.path:
 import lsv_analysis
 import lsv_compare
 import lsv_plot
+
+
+def load_area(config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        return float(cfg.get("area", 1.0))
+    except Exception:
+        return 1.0
 
 
 def run_stages(args, output_dir):
@@ -41,7 +52,8 @@ def run_stages(args, output_dir):
     if args.gap_mv is not None:
         analysis_args += ["--eta10-gap", str(args.gap_mv)]
     if args.pick:
-        analysis_args += ["--pick"] + args.pick
+        for pick in args.pick:
+            analysis_args += ["--pick", pick]
 
     print("=== 1/3 过电位分析（选择） ===")
     rc = lsv_analysis.main(analysis_args)
@@ -86,17 +98,19 @@ def main(argv=None):
     parser.add_argument("--input-dir", required=True, help="数据目录（递归扫描 *.txt）")
     parser.add_argument("--output-dir", default=None, help="输出根目录（默认 output/<输入目录名>_0）")
     parser.add_argument("--config", default=os.path.join(SCRIPT_DIR, "config.yaml"), help="配置文件")
-    parser.add_argument("--area", type=float, default=1.0, help="电极面积 cm2")
+    parser.add_argument("--area", type=float, default=None, help="电极面积 cm2，默认读 config.yaml 的 area")
     parser.add_argument("--rhe", type=float, default=1.23, help="RHE 基准电位")
     parser.add_argument("--targets", nargs="+", type=float, default=[10.0, 100.0], help="目标电流密度")
     parser.add_argument("--x-min", type=float, default=None, help="样品图 x 轴起点（默认读 config）")
     parser.add_argument("--gap-mv", type=float, default=None, help="η10 并列阈值")
     parser.add_argument("--exclude-mv", type=float, default=None, help="极差样品剔除阈值")
     parser.add_argument("--majority-ratio", type=float, default=None, help="多数曲线达到 100 的比例阈值")
-    parser.add_argument("--pick", nargs="+", default=[], help="目录=文件名，指定最优曲线")
+    parser.add_argument("--pick", action="append", default=[], help="目录=文件名，可重复指定")
     parser.add_argument("--skip-plot", action="store_true", help="跳过样品图")
     parser.add_argument("--skip-compare", action="store_true", help="跳过对比图")
     args = parser.parse_args(argv)
+    if args.area is None:
+        args.area = load_area(args.config)
 
     input_dir = os.path.abspath(args.input_dir)
     if args.output_dir:

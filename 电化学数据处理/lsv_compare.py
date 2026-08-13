@@ -166,7 +166,7 @@ def main(argv=None):
     parser.add_argument("--best-csv", required=True, help="lsv_best.csv（选择后数据）")
     parser.add_argument("--output-dir", default=os.path.join(SCRIPT_DIR, "output", "对比图"))
     parser.add_argument("--config", default=os.path.join(SCRIPT_DIR, "config.yaml"))
-    parser.add_argument("--area", type=float, default=1.0)
+    parser.add_argument("--area", type=float, default=None, help="电极面积 cm2，默认读 config.yaml 的 area")
     parser.add_argument("--rhe", type=float, default=1.23)
     parser.add_argument("--targets", nargs="+", type=float, default=[10.0, 100.0])
     parser.add_argument("--exclude-mv", type=float, default=None)
@@ -179,6 +179,8 @@ def main(argv=None):
     args.best_csv = os.path.abspath(args.best_csv)
 
     cfg, compare = load_config(args.config)
+    if args.area is None:
+        args.area = float(cfg.get("area", 1.0))
     if args.exclude_mv is not None:
         compare["exclude_mv"] = args.exclude_mv
     if args.majority_ratio is not None:
