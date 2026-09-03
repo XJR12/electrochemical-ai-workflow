@@ -182,3 +182,36 @@ tafel/
 ### 结果目录名带 `_1`、`_2`？
 
 说明 `_0` 目录里有文件正被打开或被占用。关掉相关 Excel/WPS/图片查看器后重新运行即可，也可以直接使用自动生成的 `_1` 目录。
+
+
+## ECSA/Cdl 模块（命令行）
+
+新增 `ecsa_analysis.py`、`ecsa_pipeline.py`、`ecsa_plot.py`，实现双电层电容法（Cdl 法）的 ECSA 数据处理，不引入 PySimpleCV：
+
+```text
+原始 CV txt（每个 txt 可含多圈）
+    ↓
+自动解析完整回线并打分
+    ↓
+有歧义才 --pick 人工指定
+    ↓
+selected_cv.csv（中间数据）
+    ↓
+自动建议中心电位 → 提取 ja/jc → Δj=(ja-jc)/2
+    ↓
+Δj 对扫速 v 线性拟合 → Cdl（带截距的普通最小二乘）
+```
+
+数据目录约定与 LSV 相同：父文件夹下每个子文件夹是一个样品；同一扫速的多个重复文件（如 `2MV_C01.txt`、`2MV-2_C01.txt`）归为同一个扫速。文件名中的 `MV` 按 mV/s 处理。
+
+```powershell
+python ecsa_pipeline.py --input-dir "数据父目录"
+# 有手动候选时指定，可重复
+python ecsa_pipeline.py --input-dir "数据父目录" --pick "样品名=2MV_C01.txt#2"
+# 固定中心电位 / 可选输出 ECSA（Cs 单位 µF/cm²）
+python ecsa_pipeline.py --input-dir "数据父目录" --center-potential "样品名=1.10" --cs 40
+```
+
+输出位于 `output\<父目录名>_0\ecsa\`：`ecsa_per_file.csv`（每圈审计）、`ecsa_best.csv`（最终选择）、`selected_cv\<样品>.csv`、`Δj表.csv`、`Cdl结果.csv`、`Cdl汇总.md`、`选择说明.txt`、`ECSA图\<样品>\`（CV 总图 + Cdl 拟合图）。
+
+单位说明：拟合采用 v 的单位为 mV/s、Δj 单位为 mA/cm²，斜率再换算为 mF/cm² 与 µF/cm² 双单位输出；具体换算口径待补充文献依据后再更新本段说明。

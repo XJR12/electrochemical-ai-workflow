@@ -41,3 +41,19 @@ tafel:
   eta_min: null
   eta_max: null
   fontweight: bold
+
+ecsa:
+  center_potential: null
+  cs_uf_cm2: null
+  score_gap: 0.002
+  max_manual_candidates: 3
+  cv:
+    xlabel: "E (V vs. RHE)"
+    ylabel: "Current density (mA·cm$^{-2}$)"
+    x_major_step: 0.05
+    x_minor_step: 0.025
+    fontweight: bold
+  fit:
+    xlabel: "$v$ / (mV s$^{-1}$)"
+    ylabel: "$\\Delta j$ (mA cm$^{-2}$)"
+    fontweight: bold
