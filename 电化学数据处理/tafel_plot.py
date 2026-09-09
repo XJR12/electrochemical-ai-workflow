@@ -12,7 +12,8 @@ Tafel axes:
 
 Each curve is drawn twice: all positive-current points, and a cropped view
 (default j >= 1 mA cm^-2) so the linear-looking region can be inspected.
-No slope fitting is performed yet.
+The Tafel slope is then found automatically by sliding a ~1 decade-wide
+window along log10(j) and choosing the window with the highest R^2.
 """
 
 import argparse
@@ -24,6 +25,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter, MultipleLocator
+import numpy as np
 import yaml
 
 from lsv_analysis import clean_forward_sweep, group_kind, read_lsv
@@ -51,6 +53,11 @@ DEFAULTS = {
         "j_max": None,
         "eta_min": None,
         "eta_max": None,
+        "fit_eta_min_mv": 50.0,
+        "fit_window_decades": 1.0,
+        "fit_r2_min": 0.99,
+        "fit_slope_min_mv_dec": 30.0,
+        "fit_slope_max_mv_dec": 200.0,
         "fontweight": "bold",
     },
     "legend": {
@@ -130,16 +137,190 @@ def filter_curve(curve, tafel_cfg):
     return out
 
 
-def save_tafel_figure(curves, out_path, cfg, notes):
-    fig, ax = plt.subplots(figsize=cfg["figure"]["figsize"], dpi=cfg["figure"]["dpi"])
-    for c in curves:
-        ax.plot(c["logj"], c["eta"], linewidth=cfg["curve"]["linewidth"],
-                marker=cfg["curve"]["marker"], label=c["label"])
+def _fit_domain(curve, tafel_cfg):
+    """Return sorted (log10(j), eta) pairs allowed for slope fitting."""
+    base = filter_curve(curve, tafel_cfg)
+    fit_eta_min = tafel_cfg.get("fit_eta_min_mv")
+    pairs = [
+        (lj, eta)
+        for lj, eta in zip(base["logj"], base["eta"])
+        if fit_eta_min is None or eta >= fit_eta_min
+    ]
+    pairs.sort()
+    return [p[0] for p in pairs], [p[1] for p in pairs]
 
-    xmin = min(min(c["logj"]) for c in curves)
-    xmax = max(max(c["logj"]) for c in curves)
-    ymin = min(min(c["eta"]) for c in curves)
-    ymax = max(max(c["eta"]) for c in curves)
+
+def _fit_candidates(xs, ys, target_decades):
+    """Return one candidate per start, with the span closest to one decade."""
+    candidates = []
+    n = len(xs)
+    for start in range(n - 2):
+        end = start + 1
+        while end < n and xs[end] - xs[start] < target_decades:
+            end += 1
+        if end >= n:
+            break
+        if end - start + 1 < 3:
+            continue
+        xw = np.asarray(xs[start : end + 1], dtype=float)
+        yw = np.asarray(ys[start : end + 1], dtype=float)
+        slope, intercept = np.polyfit(xw, yw, 1)
+        predicted = slope * xw + intercept
+        ss_res = float(np.sum((yw - predicted) ** 2))
+        ss_tot = float(np.sum((yw - np.mean(yw)) ** 2))
+        if ss_tot > 1e-15:
+            r2 = 1.0 - ss_res / ss_tot
+        else:
+            r2 = 1.0 if ss_res < 1e-15 else 0.0
+        candidates.append({
+            "slope": float(slope),
+            "intercept": float(intercept),
+            "r2": float(r2),
+            "x0": float(xw[0]),
+            "x1": float(xw[-1]),
+            "eta0": float(yw[0]),
+            "eta1": float(yw[-1]),
+            "n": int(xw.size),
+        })
+    return candidates
+
+
+def _no_fit_result(warning):
+    return {
+        "ok": False,
+        "slope": None,
+        "intercept": None,
+        "r2": None,
+        "x0": None,
+        "x1": None,
+        "eta0": None,
+        "eta1": None,
+        "n": 0,
+        "warning": warning,
+    }
+
+
+def find_tafel_fit(curve, tafel_cfg):
+    """Fit the most linear ~1 decade window and return a result dict."""
+    xs, ys = _fit_domain(curve, tafel_cfg)
+    target = float(tafel_cfg.get("fit_window_decades", 1.0))
+    slope_min = tafel_cfg.get("fit_slope_min_mv_dec")
+    slope_max = tafel_cfg.get("fit_slope_max_mv_dec")
+    r2_min = tafel_cfg.get("fit_r2_min", 0.99)
+
+    if len(xs) < 3:
+        return _no_fit_result(
+            "无足够拟合数据点（可用点 %d），未自动拟合" % len(xs)
+        )
+
+    candidates = _fit_candidates(xs, ys, target)
+    if not candidates:
+        return _no_fit_result(
+            "未找到跨度至少 %.1f 个数量级的连续窗口（可用点 %d），未自动拟合"
+            % (target, len(xs))
+        )
+
+    ranked = sorted(candidates, key=lambda c: c["r2"], reverse=True)
+    valid = [
+        c for c in ranked
+        if (slope_min is None or c["slope"] >= slope_min)
+        and (slope_max is None or c["slope"] <= slope_max)
+    ]
+    if not valid:
+        top = ranked[0]
+        return _no_fit_result(
+            "所有候选斜率均不在 %.0f-%.0f mV/dec 范围（最高R²=%.4f），未自动拟合"
+            % (slope_min, slope_max, top["r2"])
+        )
+
+    chosen = valid[0]
+    warning = ""
+    if chosen["r2"] < r2_min:
+        warning = (
+            "R²=%.4f 低于 %.4f，线性不佳，建议人工复核或先降噪"
+            % (chosen["r2"], r2_min)
+        )
+    if chosen is not ranked[0]:
+        prefix = "最高R²候选斜率 %.1f mV/dec 不在范围内，已顺延至范围内有效候选" % (
+            ranked[0]["slope"]
+        )
+        warning = prefix if not warning else prefix + "；" + warning
+
+    result = {
+        "ok": True,
+        "slope": chosen["slope"],
+        "intercept": chosen["intercept"],
+        "r2": chosen["r2"],
+        "x0": chosen["x0"],
+        "x1": chosen["x1"],
+        "eta0": chosen["eta0"],
+        "eta1": chosen["eta1"],
+        "n": chosen["n"],
+        "warning": warning,
+    }
+    return result
+
+
+def attach_fit_results(curves, tafel_cfg, notes):
+    """Add one Tafel slope result to each curve, computing only once."""
+    for c in curves:
+        if c.get("tafel_fit") is not None:
+            continue
+        fit = find_tafel_fit(c, tafel_cfg)
+        c["tafel_fit"] = fit
+        name = os.path.basename(c["path"])
+        if fit["ok"]:
+            print("Tafel 拟合：%s -> %.1f mV/dec (R²=%.4f)" % (
+                name, fit["slope"], fit["r2"]
+            ))
+        if fit["warning"]:
+            print("警告：%s（%s）" % (fit["warning"], name))
+            notes.append("Tafel 拟合警告：%s（%s）" % (fit["warning"], name))
+
+
+def save_tafel_figure(curves, out_path, cfg, notes, fit_mode=False):
+    fig, ax = plt.subplots(figsize=cfg["figure"]["figsize"], dpi=cfg["figure"]["dpi"])
+    fitted_lines = []
+    if fit_mode:
+        no_fit = []
+        for c in curves:
+            fit = c.get("tafel_fit") or {}
+            if fit.get("ok"):
+                label = c["label"]
+                if len(curves) > 1:
+                    label = "%s (%.1f mV/dec, R²=%.4f)" % (
+                        label, fit["slope"], fit["r2"]
+                    )
+                y0 = fit["slope"] * fit["x0"] + fit["intercept"]
+                y1 = fit["slope"] * fit["x1"] + fit["intercept"]
+                ax.plot(
+                    [fit["x0"], fit["x1"]], [y0, y1],
+                    linewidth=cfg["curve"]["linewidth"], label=label,
+                )
+                fitted_lines.append((fit["x0"], fit["x1"], y0, y1))
+            elif len(curves) > 1:
+                no_fit.append(c["label"] + " (no fit)")
+        for label in no_fit:
+            ax.plot([], [], color="none", label=label)
+    else:
+        for c in curves:
+            ax.plot(
+                c["logj"], c["eta"], linewidth=cfg["curve"]["linewidth"],
+                marker=cfg["curve"]["marker"], label=c["label"],
+            )
+
+    if fit_mode and fitted_lines:
+        xmin = min(item[0] for item in fitted_lines)
+        xmax = max(item[1] for item in fitted_lines)
+        ymin = min(item[2] for item in fitted_lines)
+        ymax = max(item[3] for item in fitted_lines)
+    elif fit_mode:
+        xmin, xmax, ymin, ymax = 0.0, 1.0, 0.0, 100.0
+    else:
+        xmin = min(min(c["logj"]) for c in curves)
+        xmax = max(max(c["logj"]) for c in curves)
+        ymin = min(min(c["eta"]) for c in curves)
+        ymax = max(max(c["eta"]) for c in curves)
     pad_x = max((xmax - xmin) * 0.05, 0.1)
     pad_y = max((ymax - ymin) * 0.05, 5.0)
     ax.set_xlim(xmin - pad_x, xmax + pad_x)
@@ -158,6 +339,19 @@ def save_tafel_figure(curves, out_path, cfg, notes):
     ax.legend(loc=cfg["legend"]["loc"], fontsize=cfg["legend"]["fontsize"],
               frameon=True, edgecolor="black")
 
+    if fit_mode and len(curves) == 1:
+        fit = curves[0].get("tafel_fit") or {}
+        if fit.get("ok"):
+            text = "Tafel slope = %.1f mV/dec\nR² = %.4f" % (
+                fit["slope"], fit["r2"]
+            )
+        else:
+            text = "No valid 1-decade fit window"
+        ax.text(0.97, 0.04, text, transform=ax.transAxes, ha="right",
+                va="bottom", fontsize=11,
+                bbox=dict(boxstyle="round,pad=0.35",
+                          facecolor="white", edgecolor="black"))
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, dpi=cfg["figure"]["dpi"], bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
@@ -166,9 +360,14 @@ def save_tafel_figure(curves, out_path, cfg, notes):
 
 
 def save_tafel_versions(curves, out_dir, stem, cfg, notes):
+    attach_fit_results(curves, cfg["tafel"], notes)
     full = [c for c in curves if len(c["eta"]) >= 2]
     if full:
         save_tafel_figure(full, os.path.join(out_dir, stem + ".png"), cfg, notes)
+        save_tafel_figure(
+            full, os.path.join(out_dir, stem + "-斜率拟合.png"), cfg, notes,
+            fit_mode=True,
+        )
 
     crops = [filter_curve(c, cfg["tafel"]) for c in curves]
     crops = [c for c in crops if len(c["eta"]) >= 2]
@@ -216,8 +415,25 @@ def write_per_file_csv(output_dir, curves):
         writer.writerow([
             "目录", "文件", "点数", "η最小/mV", "η最大/mV",
             "j最小/mA_cm-2", "j最大/mA_cm-2", "log10(j)最小", "log10(j)最大",
+            "Tafel斜率/(mV/dec)", "截距", "R²",
+            "拟合log10(j)起", "拟合log10(j)止", "拟合点数",
+            "拟合η起/mV", "拟合η止/mV", "警告",
         ])
         for c in curves:
+            fit = c.get("tafel_fit") or {}
+            if fit.get("ok"):
+                slope_text = "%.1f" % fit["slope"]
+                intercept_text = "%.1f" % fit["intercept"]
+                r2_text = "%.4f" % fit["r2"]
+                x0_text = "%.4f" % fit["x0"]
+                x1_text = "%.4f" % fit["x1"]
+                n_text = str(fit["n"])
+                eta0_text = "%.1f" % fit["eta0"]
+                eta1_text = "%.1f" % fit["eta1"]
+            else:
+                slope_text = intercept_text = r2_text = ""
+                x0_text = x1_text = n_text = ""
+                eta0_text = eta1_text = ""
             writer.writerow([
                 c["folder"],
                 os.path.basename(c["path"]),
@@ -228,6 +444,15 @@ def write_per_file_csv(output_dir, curves):
                 "%.6g" % max(c["j"]),
                 "%.4f" % min(c["logj"]),
                 "%.4f" % max(c["logj"]),
+                slope_text,
+                intercept_text,
+                r2_text,
+                x0_text,
+                x1_text,
+                n_text,
+                eta0_text,
+                eta1_text,
+                fit.get("warning", ""),
             ])
     return path
 
@@ -255,11 +480,17 @@ def write_summary_md(output_dir, curves):
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, "Tafel数据对比.md")
     lines = [
-        "| 样品 | 文件 | η范围/mV | j范围/mA·cm⁻² | log10(j)范围 |",
-        "| --- | --- | --- | --- | --- |",
+        "| 样品 | 文件 | η范围/mV | j范围/mA·cm⁻² | log10(j)范围 | Tafel斜率/(mV/dec) | R² |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for c in curves:
-        lines.append("| %s | %s | %.1f-%.1f | %.4g-%.4g | %.2f-%.2f |" % (
+        fit = c.get("tafel_fit") or {}
+        if fit.get("ok"):
+            slope_text = "%.1f" % fit["slope"]
+            r2_text = "%.4f" % fit["r2"]
+        else:
+            slope_text = r2_text = "-"
+        lines.append("| %s | %s | %.1f-%.1f | %.4g-%.4g | %.2f-%.2f | %s | %s |" % (
             c["folder"],
             os.path.basename(c["path"]),
             min(c["eta"]),
@@ -268,6 +499,8 @@ def write_summary_md(output_dir, curves):
             max(c["j"]),
             min(c["logj"]),
             max(c["logj"]),
+            slope_text,
+            r2_text,
         ))
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")

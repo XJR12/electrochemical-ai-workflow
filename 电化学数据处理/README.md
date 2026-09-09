@@ -15,7 +15,7 @@
 - `lsv_analysis.py`：解析 BioLogic EC-Lab 格式 LSV，自动识别 η10/η100，输出中文 CSV（UTF-8 BOM）。
 - `lsv_plot.py`：每个样品组一张直接测图、一张 iR 补偿图。
 - `lsv_compare.py`：自动生成总对比图与按条件词分组的对比图，自动剔除极差样品。
-- `tafel_plot.py`：用 iR 后 LSV 数据直接出 `log10(j)-η` 的 Tafel 图，支持 `--files` 与 `--best-csv` 两种入口。
+- `tafel_plot.py`：用 iR 后 LSV 数据出 `log10(j)-η` 的 Tafel 图，并自动滑动约 1 个数量级窗口拟合 Tafel 斜率，支持 `--files` 与 `--best-csv` 两种入口。
 - `config.yaml`：绘图、对比、电极面积等规则配置。
 
 
@@ -114,7 +114,10 @@ python lsv_pipeline.py --input-dir "数据目录" --pick "3%-1g-0802#直接测=4
 - 纵轴：过电位 `η = (E − 1.23) × 1000`（mV，`--rhe` 可调）；
 - 只使用文件名以 `IR` 开头（或含 `-ir`/`_ir`）的 iR 曲线；
 - 每个曲线出两版：全数据版（`j > 0`）和截取版（默认 `j ≥ 1 mA·cm⁻²`，可用 `--j-min`/`--j-max`/`--eta-min`/`--eta-max` 调整）；
-- v1 不做斜率拟合。
+- 自动拟合：在满足 `η ≥ 50 mV`（`fit_eta_min_mv`）和截取条件的正电流段内，从低电流向高电流滑动约 1 个数量级窗口，选 `R²` 最高的窗口，输出 `Tafel斜率/(mV/dec)`、`R²`、拟合起止与警告；
+- 物理过滤：若最高 `R²` 候选斜率不在 `fit_slope_min_mv_dec` 到 `fit_slope_max_mv_dec` 范围内（默认 30–200 mV/dec），会自动顺延到范围内有效候选；所有参数都写在 `config.yaml` 的 `tafel:` 里，不在代码中写死；
+- 不加平滑：`R²` 低于 `fit_r2_min`（默认 0.99）时只输出人工复核警告，不中断流程，也不引入 scipy 依赖；
+- 额外生成独立拟合图：`-斜率拟合.png` 只显示拟合得到的直线，不叠画原始曲线，坐标范围按拟合线自动收窄；每个样品一张，每组对比一张，原全图版和截取版仍保留原始曲线。
 
 前置步骤：`--best-csv` 用的 `lsv_best.csv` 由 LSV 流程生成，不是 Tafel 模块生成的。没有该文件时先跑 LSV 一键流程：
 
@@ -150,11 +153,11 @@ Tafel 单独输出的文件：
 
 ```text
 tafel/
-├── tafel_per_file.csv      每条 iR 曲线的 η/j/log10(j) 范围
+├── tafel_per_file.csv      每条 iR 曲线的 η/j/log10(j) 范围、Tafel斜率/R²/拟合区间/警告
 ├── tafel_points.csv        转换后的逐点数据
-├── Tafel数据对比.md
-├── 样品/                   Tafel-<样品>.png 和 Tafel-<样品>-截取.png
-└── 对比图/                 总图与分组对比图（best-csv 模式）
+├── Tafel数据对比.md        自动拟合后的斜率与 R² 汇总
+├── 样品/                   Tafel-<样品>.png、Tafel-<样品>-截取.png、Tafel-<样品>-斜率拟合.png
+└── 对比图/                 总图与分组对比图，含对应的 -斜率拟合.png（best-csv 模式）
 ```
 
 如果 `output` 里的文件正被 Excel/WPS 打开导致写入失败，程序会自动改用 `_1`、`_2` 继续，不会中断。平时先关闭占用的文件即可。
@@ -163,7 +166,7 @@ tafel/
 
 电极面积写在 `config.yaml` 的 `area` 字段，默认 `1.0 cm²`，一键入口不再询问；如果不是 `1.0`，改这里即可。
 
-其余默认规则也都写在 `config.yaml` 里：RHE 基准按 `1.23 V` 算，目标电流密度是 `10` 和 `100 mA·cm⁻²`，Tafel 截取版默认从 `j ≥ 1 mA·cm⁻²` 开始。需要调整时可以打开 `config.yaml` 修改对应数值。
+其余默认规则也都写在 `config.yaml` 里：RHE 基准按 `1.23 V` 算，目标电流密度是 `10` 和 `100 mA·cm⁻²`，Tafel 截取版默认从 `j ≥ 1 mA·cm⁻²` 开始。自动拟合相关参数为 `fit_eta_min_mv`、`fit_window_decades`、`fit_r2_min`、`fit_slope_min_mv_dec`、`fit_slope_max_mv_dec`，需要调整时打开 `config.yaml` 修改即可。
 
 ## 规则摘要
 

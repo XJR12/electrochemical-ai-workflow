@@ -40,6 +40,11 @@ tafel:
   j_max: null
   eta_min: null
   eta_max: null
+  fit_eta_min_mv: 50.0
+  fit_window_decades: 1.0
+  fit_r2_min: 0.99
+  fit_slope_min_mv_dec: 30.0
+  fit_slope_max_mv_dec: 200.0
   fontweight: bold
 
 ecsa:
