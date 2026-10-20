@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Plot LSV raw/iR curves from BioLogic txt files.
+"""Plot LSV curves from CHI / BioLogic txt files.
+
+Two modes:
+
+- default: group by parent folder and raw / iR (filename starts with IR);
+  one figure per group per kind, all repeats of that group on one figure.
+- ``--each-file``: one figure per txt, axes fitted to the data, no grouping
+  and no manual selection. Useful for a flat folder of CHI exports.
 
 Usage:
     python lsv_plot.py --input-dir <data folder> --output-dir <output folder>
+    python lsv_plot.py --input-dir <data folder> --each-file
     python lsv_plot.py --input-dir <data folder> --config config.yaml
 
 Behavior:
@@ -18,14 +26,16 @@ Behavior:
 import argparse
 import math
 import os
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MultipleLocator, FormatStrFormatter
+from matplotlib.ticker import AutoLocator, MultipleLocator, FormatStrFormatter
 import yaml
 
 from lsv_analysis import clean_forward_sweep, group_kind, read_lsv
+from output_utils import next_output_dir
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -136,14 +146,102 @@ def plot_group(group, kind, out_dir, cfg, area, x_min_override):
     return out_path
 
 
+def plot_each_file(paths, input_dir, out_dir, cfg, area, y_unit, abs_current,
+                   x_label, y_label):
+    """One figure per txt file, with axes fitted to the data.
+
+    This is the "just plot what I have" mode: no sample grouping, no manual
+    selection, no area normalisation unless --y-unit density is requested.
+    """
+    ylabel = y_label
+    if ylabel is None:
+        ylabel = ("Current density (mA cm$^{-2}$)" if y_unit == "density"
+                  else "Current (mA)")
+    xlabel = x_label or "Potential (V)"
+    made = 0
+
+    for path in sorted(paths):
+        E, I, is_density = read_lsv(path)
+        E2, I2 = clean_forward_sweep(E, I, e_min=None)
+        if len(E2) < 3:
+            print("警告：没有解析到 LSV 数据点，跳过：%s" % path)
+            continue
+
+        if y_unit == "density":
+            j = list(I2) if is_density else [v / area for v in I2]
+        else:
+            j = list(I2)
+            if is_density:
+                print("警告：该文件电流列本身是电流密度，无法还原成 mA：%s" % path)
+        if abs_current:
+            j = [abs(v) for v in j]
+
+        x_min = min(E2)
+        x_max = max(E2)
+        if x_max <= x_min:
+            print("警告：电位没有跨度，跳过：%s" % path)
+            continue
+        x_pad = (x_max - x_min) * 0.02
+
+        y_low = min(j)
+        y_high = max(j)
+        if y_high <= 0:
+            y_lim = (y_low * 1.05, 0.0)
+        else:
+            y_lim = (min(0.0, y_low * 1.05), y_high * 1.05)
+
+        fig, ax = plt.subplots(figsize=cfg["figure"]["figsize"],
+                               dpi=cfg["figure"]["dpi"])
+        ax.plot(E2, j, linewidth=cfg["curve"]["linewidth"],
+                marker=cfg["curve"]["marker"])
+        ax.set_xlim(x_min - x_pad, x_max + x_pad)
+        ax.set_ylim(*y_lim)
+        ax.set_xlabel(xlabel, fontsize=12,
+                      fontweight=cfg["axis"].get("fontweight", "normal"))
+        ax.set_ylabel(ylabel, fontsize=12,
+                      fontweight=cfg["axis"].get("fontweight", "normal"))
+        ax.xaxis.set_major_locator(AutoLocator())
+        ax.xaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+        ax.set_title(os.path.splitext(os.path.basename(path))[0], fontsize=12)
+
+        if input_dir:
+            rel_dir = os.path.dirname(os.path.relpath(path, input_dir))
+        else:
+            rel_dir = ""
+        target_dir = os.path.join(out_dir, rel_dir) if rel_dir else out_dir
+        os.makedirs(target_dir, exist_ok=True)
+        out_path = os.path.join(target_dir,
+                                os.path.splitext(os.path.basename(path))[0] + ".png")
+        fig.savefig(out_path, dpi=cfg["figure"]["dpi"], bbox_inches="tight",
+                    pad_inches=0.02)
+        plt.close(fig)
+        made += 1
+        print("已生成：%s" % out_path)
+
+    if made == 0:
+        print("没有生成任何图：请确认目录里有 LSV 的 txt 数据。")
+        return 1
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="LSV 自动绘图")
     parser.add_argument("files", nargs="*", help="LSV txt 文件（可选）")
     parser.add_argument("--input-dir", help="递归扫描目录下的 *.txt")
-    parser.add_argument("--output-dir", default=os.path.join(SCRIPT_DIR, "output", "样品"), help="图片输出目录")
+    parser.add_argument("--output-dir", default=None,
+                        help="图片输出目录；不填时自动新建 output/<输入文件夹名>_<序号>/图，不覆盖旧结果")
     parser.add_argument("--config", default=os.path.join(SCRIPT_DIR, "config.yaml"), help="配置文件路径")
     parser.add_argument("--area", type=float, default=None, help="电极面积 cm2，默认读 config.yaml 的 area")
     parser.add_argument("--x-min", type=float, default=None, help="x 轴起点（默认读 config）")
+    parser.add_argument("--each-file", action="store_true",
+                        help="每个 txt 单独一张图，坐标轴按数据自动范围（不分组、不选线）")
+    parser.add_argument("--y-unit", choices=["mA", "density"], default=None,
+                        help="每个文件一张图时的 y 轴：mA=原始电流；density=除以面积（默认 mA）")
+    parser.add_argument("--abs-current", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="每个文件一张图时电流取绝对值（默认取绝对值）")
+    parser.add_argument("--x-label", default=None, help="x 轴标题（默认 Potential (V)）")
+    parser.add_argument("--y-label", default=None, help="y 轴标题")
     args = parser.parse_args(argv)
 
     if args.input_dir:
@@ -162,11 +260,29 @@ def main(argv=None):
     if not paths:
         parser.error("没有输入文件")
 
+    if not args.output_dir:
+        if args.input_dir:
+            base_name = os.path.basename(args.input_dir.rstrip("\\/"))
+        else:
+            base_name = os.path.splitext(os.path.basename(args.files[0]))[0]
+        run_dir = next_output_dir(os.path.join(SCRIPT_DIR, "output", base_name))
+        args.output_dir = os.path.join(run_dir, "图" if args.each_file else "样品")
+
     cfg = load_config(args.config)
     if args.area is None:
         args.area = cfg.get("area", 1.0)
-    if "font" in cfg["figure"]:
-        plt.rcParams["font.family"] = cfg["figure"]["font"]
+    plt.rcParams["font.family"] = [
+        cfg["figure"].get("font", "Arial"),
+        "Microsoft YaHei",
+        "DejaVu Sans",
+    ]
+
+    if args.each_file:
+        y_unit = args.y_unit or "mA"
+        abs_current = True if args.abs_current is None else args.abs_current
+        return plot_each_file(paths, args.input_dir, args.output_dir, cfg,
+                              args.area, y_unit, abs_current,
+                              args.x_label, args.y_label)
 
     global group_paths
     group_paths = {}
@@ -185,4 +301,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

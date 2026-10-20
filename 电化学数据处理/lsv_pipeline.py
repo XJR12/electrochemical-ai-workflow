@@ -10,6 +10,10 @@ Phase 2: after selection is complete, 数据对比.md is written and the sample
 Usage:
     python lsv_pipeline.py --input-dir <data folder>
     python lsv_pipeline.py --input-dir <data folder> --pick "Ru-2mg=1-LSV_C01.txt"
+
+The output directory defaults to output/<input folder name>_<n>. A new
+numbered directory is created on every run, so previous results are never
+overwritten.
 """
 
 import argparse
@@ -26,15 +30,19 @@ if SCRIPT_DIR not in sys.path:
 import lsv_analysis
 import lsv_compare
 import lsv_plot
+from output_utils import next_output_dir
+
+
+def load_config(config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+    except Exception:
+        return {}
 
 
 def load_area(config_path):
-    try:
-        with open(config_path, "r", encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh) or {}
-        return float(cfg.get("area", 1.0))
-    except Exception:
-        return 1.0
+    return float(load_config(config_path).get("area", 1.0))
 
 
 def run_stages(args, output_dir):
@@ -49,8 +57,8 @@ def run_stages(args, output_dir):
         "--area", str(args.area),
         "--rhe", str(args.rhe),
         "--targets"] + [str(t) for t in args.targets]
-    if args.gap_mv is not None:
-        analysis_args += ["--eta10-gap", str(args.gap_mv)]
+    if args.sanity_mv is not None:
+        analysis_args += ["--sanity-mv", str(args.sanity_mv)]
     if args.pick:
         for pick in args.pick:
             analysis_args += ["--pick", pick]
@@ -96,48 +104,55 @@ def run_stages(args, output_dir):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="LSV 一键：选择 → 数据对比.md → 样品图 + 对比图")
     parser.add_argument("--input-dir", required=True, help="数据目录（递归扫描 *.txt）")
-    parser.add_argument("--output-dir", default=None, help="输出根目录（默认 output/<输入目录名>_0）")
+    parser.add_argument("--output-dir", default=None,
+                        help="输出根目录；不填时自动新建 output/<输入目录名>_<序号>，不覆盖旧结果")
     parser.add_argument("--config", default=os.path.join(SCRIPT_DIR, "config.yaml"), help="配置文件")
     parser.add_argument("--area", type=float, default=None, help="电极面积 cm2，默认读 config.yaml 的 area")
-    parser.add_argument("--rhe", type=float, default=1.23, help="RHE 基准电位")
-    parser.add_argument("--targets", nargs="+", type=float, default=[10.0, 100.0], help="目标电流密度")
+    parser.add_argument("--rhe", type=float, default=None, help="RHE 基准电位，默认读 config.yaml 的 rhe")
+    parser.add_argument("--targets", nargs="+", type=float, default=None,
+                        help="目标电流密度，默认读 config.yaml 的 targets")
     parser.add_argument("--x-min", type=float, default=None, help="样品图 x 轴起点（默认读 config）")
-    parser.add_argument("--gap-mv", type=float, default=None, help="η10 并列阈值")
+    parser.add_argument("--sanity-mv", type=float, default=None, help="过电位低于该值视为异常（默认读 config 的 compare.sanity_mv）")
     parser.add_argument("--exclude-mv", type=float, default=None, help="极差样品剔除阈值")
     parser.add_argument("--majority-ratio", type=float, default=None, help="多数曲线达到 100 的比例阈值")
     parser.add_argument("--pick", action="append", default=[], help="目录=文件名，可重复指定")
     parser.add_argument("--skip-plot", action="store_true", help="跳过样品图")
     parser.add_argument("--skip-compare", action="store_true", help="跳过对比图")
     args = parser.parse_args(argv)
+
+    cfg = load_config(args.config)
+    compare_cfg = cfg.get("compare") or {}
     if args.area is None:
-        args.area = load_area(args.config)
+        args.area = float(cfg.get("area", 1.0))
+    if args.rhe is None:
+        args.rhe = float(cfg.get("rhe", 1.23))
+    if args.targets is None:
+        args.targets = [float(t) for t in cfg.get("targets", [10.0, 100.0])]
+    if len(args.targets) < 2:
+        parser.error("目标电流密度至少需要两个值，例如 --targets 10 100")
+    if args.sanity_mv is None:
+        args.sanity_mv = compare_cfg.get("sanity_mv")
 
     input_dir = os.path.abspath(args.input_dir)
     if args.output_dir:
         output_dir = os.path.abspath(args.output_dir)
+        base = re.sub(r"_\d+$", "", output_dir)
     else:
-        base = os.path.basename(input_dir.rstrip("\\/"))
-        output_dir = os.path.join(SCRIPT_DIR, "output", "%s_0" % base)
+        base = os.path.join(SCRIPT_DIR, "output", os.path.basename(input_dir.rstrip("\\/")))
+        output_dir = next_output_dir(base)
 
     try:
         ok = run_stages(args, output_dir)
         return 0 if ok else 1
     except PermissionError:
-        m = re.search(r"_(\d+)$", output_dir)
-        if m:
-            base = output_dir[:m.start()]
-            n = int(m.group(1)) + 1
-        else:
-            base = output_dir
-            n = 0
         while True:
-            fallback = "%s_%d" % (base, n)
+            fallback = next_output_dir(base)
             print("\n输出目录被占用（可能是文件正被打开），自动改用：%s" % fallback)
             try:
                 ok = run_stages(args, fallback)
                 return 0 if ok else 1
             except PermissionError:
-                n += 1
+                continue
 
 
 if __name__ == "__main__":

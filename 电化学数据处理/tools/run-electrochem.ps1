@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("LSV", "LSV+Tafel")]
+    [ValidateSet("LSV", "LSV+Tafel", "Plot")]
     [string]$Task,
     [string]$InputDir = "",
     [string[]]$Pick = @()
@@ -13,6 +13,7 @@ $env:PYTHONIOENCODING = "utf-8"
 $root = Split-Path -Parent $PSScriptRoot
 $outputRoot = Join-Path $root "output"
 $lsvPipeline = Join-Path $root "lsv_pipeline.py"
+$lsvPlot = Join-Path $root "lsv_plot.py"
 $tafelPlot = Join-Path $root "tafel_plot.py"
 
 $localDeps = Join-Path $root "py_deps"
@@ -109,6 +110,18 @@ function Get-DataFolder {
         }
         return (Resolve-Path -LiteralPath $folder).Path
     }
+}
+
+function Get-NewOutputDir {
+    param([string]$BaseName)
+    for ($n = 0; $n -lt 1000; $n++) {
+        $candidate = Join-Path $outputRoot ("{0}_{1}" -f $BaseName, $n)
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+    Write-Problem "输出目录编号已经到 _999，请先清理 output 目录。"
+    exit 1
 }
 
 function Get-NewestLsvBest {
@@ -212,7 +225,27 @@ if ($InputDir) {
 }
 
 $baseName = Split-Path -Leaf $inputDir
-$outDir = Join-Path $outputRoot ($baseName + "_0")
+$outDir = Get-NewOutputDir -BaseName $baseName
+
+if ($Task -eq "Plot") {
+    $plotDir = Join-Path $outDir "图"
+    Write-Step "LSV：读取并出图（每个 txt 一张，不选线、不做对比）"
+    $plotArgs = @(
+        $lsvPlot,
+        "--input-dir", $inputDir,
+        "--output-dir", $plotDir,
+        "--each-file",
+        "--y-unit", "mA"
+    )
+    $plotRc = Invoke-Python -Arguments $plotArgs
+    if ($plotRc -ne 0) {
+        Write-Problem "出图失败，请检查窗口里的报错。"
+        exit 1
+    }
+    Show-ResultPath -Path $plotDir
+    exit 0
+}
+
 $startTime = Get-Date
 $picks = New-Object System.Collections.Generic.List[string]
 foreach ($pickItem in $Pick) {

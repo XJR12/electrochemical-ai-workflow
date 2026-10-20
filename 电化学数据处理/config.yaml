@@ -1,14 +1,53 @@
+# ============================================================
+# 电化学数据处理配置
+#
+# 一般只需要看“常用设置”这几项，其余保持默认即可。
+# 改完保存，下一次运行生效；不需要重启电脑。
+# ============================================================
+
+# ---------------- 常用设置 ----------------
+
+# 电极面积，单位 cm2。
+# 只有“除以面积算电流密度”时用到；只画图入口默认画原始电流 mA，不受这里影响。
 area: 1.0
 
+# 过电位基准：过电位 = 电位 - rhe，单位 V。
+# 数据本身已经是 vs RHE 时保持 1.23；如果数据是 vs 其它参比，这里不能直接当换算用。
+rhe: 1.23
+
+# 目标电流密度，单位 mA/cm2。
+# 第一个算 η10，第二个算 η100；顺序不要反。
+targets: [10.0, 100.0]
+
+# ---------------- 选线流程 ----------------
+# 只影响“选线+LSV画图”和“选线+LSV画图+Tafel”，不影响“一键LSV画图”。
+
+compare:
+  # 过电位低于该值（mV）时，把曲线标记为“异常”。
+  sanity_mv: 0.0
+  # 对比图里，η10 比组内中位数高超过该值（mV）的样品自动剔除。
+  exclude_mv: 100.0
+  # 超过这个比例的曲线达到 η100 时，对比图 y 轴用 0-100；否则用 0-10。
+  majority_ratio: 0.5
+  # 对比图横轴终点在数据末端之外多留的电位（V）。
+  x_end_pad: 0.01
+  # 手动指定对比分组，一般留空。写法见 README。
+  manual_groups: []
+
+# ---------------- 画图外观 ----------------
+# 一般不用改。
+
 figure:
-  dpi: 600
-  font: Arial
-  figsize: [8.0, 6.0]
+  dpi: 600          # 分辨率，期刊一般 600
+  font: Arial       # 英文字体；中文标题会自动用微软雅黑
+  figsize: [8.0, 6.0]  # 图片宽高，英寸
 
 curve:
   linewidth: 2.0
   marker: none
 
+# 选线流程的样品图/对比图坐标设置。
+# “一键LSV画图”会按数据自动取范围，不用这里的 x_min。
 axis:
   xlabel: "Potential (V vs. RHE)"
   ylabel: "Current density (mA·cm$^{-2}$)"
@@ -21,13 +60,8 @@ legend:
   loc: upper left
   fontsize: 10
 
-compare:
-  gap_mv: 5.0
-  sanity_mv: 0.0
-  exclude_mv: 100.0
-  majority_ratio: 0.5
-  x_end_pad: 0.01
-  manual_groups: []
+# ---------------- Tafel ----------------
+# 只影响“选线+LSV画图+Tafel”。
 
 tafel:
   xlabel: "log(j / mA cm$^{-2}$)"
@@ -36,24 +70,32 @@ tafel:
   x_minor_step: 0.5
   y_major_step: 50.0
   y_minor_step: 10.0
+  # 截取版 Tafel 图的电流密度下限；j_max / eta_min / eta_max 为 null 表示不限制。
   j_min: 1.0
   j_max: null
   eta_min: null
   eta_max: null
+  # 自动拟合：只拟合过电位不低于该值（mV）的正电流段。
   fit_eta_min_mv: 50.0
+  # 滑动窗口宽度（多少个数量级）。
   fit_window_decades: 1.0
+  # 低于该 R² 时只给人工复核警告，不中断流程。
   fit_r2_min: 0.99
+  # 合理的 Tafel 斜率范围（mV/dec）；超出范围会换下一个候选窗口。
   fit_slope_min_mv_dec: 30.0
   fit_slope_max_mv_dec: 200.0
   fontweight: bold
 
+# ---------------- ECSA / Cdl ----------------
+# 只影响 ecsa_*.py 命令行模块。
+
 ecsa:
-  center_potential: null
-  cs_uf_cm2: null
+  center_potential: null   # 固定中心电位；null 表示自动推荐
+  cs_uf_cm2: null          # 已知比电容；null 表示只算 Cdl
   score_gap: 0.002
   max_manual_candidates: 3
   cv:
-    xlabel: "E (V vs. RHE)"
+    xlabel: "E (V vs. Hg/HgO)"
     ylabel: "Current density (mA·cm$^{-2}$)"
     x_major_step: 0.05
     x_minor_step: 0.025

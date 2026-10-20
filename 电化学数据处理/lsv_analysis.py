@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Parse BioLogic EC-Lab LSV files and report overpotential at target currents.
+"""Parse LSV text files from CHI / BioLogic EC-Lab and report overpotential.
 
-Reads LSV text files (potential in V, current in mA), takes the forward
-(monotonically increasing potential) sweep, and finds the potential where
-the current density crosses each target value using linear interpolation.
+Reads LSV text files where potential is in V and current is in A or mA (the
+unit is detected from the column header). Leading measurement information
+and comma/tab/space separators are handled automatically, and the reader
+accepts both ascending (OER) and descending (HER) sweeps. Repeated
+measurements of the same sample/condition are grouped by parent folder and
+by whether the filename starts with IR. When one curve is better in both
+eta10 and eta100 it is auto-selected; mutually non-dominated curves are
+listed as manual candidates and the user should choose with --pick.
 
-Repeated measurements of the same sample/condition are grouped by parent
-folder and by whether the filename starts with IR. The best curve is
-auto-selected by the lowest eta at the first target, unless the gap to the
-second-best curve is larger than --eta10-gap (then all candidates are listed
-and the user should choose with --pick).
+Note: the overpotential workflow keeps the OER convention of ignoring data
+below 1.3 V. Use lsv_plot.py --each-file for HER or low-potential data.
 
 Usage:
     python lsv_analysis.py file1.txt file2.txt ...
@@ -22,95 +24,237 @@ import argparse
 import csv
 import math
 import os
+import re
 import sys
+
+# 读取文件时依次尝试的编码。CHI / EC-Lab 的 txt 可能是 UTF-8、GBK 或纯 ASCII。
+_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "latin-1")
+
+# 表头里表示电位 / 电流的常见写法
+_E_HEADER_PATTERN = re.compile(r"\be\s*/\s*v\b|\bpotential\b|\bewe\b|\bvolt")
+_I_HEADER_PATTERN = re.compile(
+    r"\bcurrent\b|<i>|\bi\s*/\s*(?:m|u|µ|μ)?a\b|\bj\s*/|\bcurrent density\b"
+)
+
+
+def _read_lines(path):
+    for encoding in _ENCODINGS:
+        try:
+            with open(path, "r", encoding=encoding) as fh:
+                return fh.read().splitlines()
+        except UnicodeDecodeError:
+            continue
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        return fh.read().splitlines()
 
 
 def parse_number(text):
-    text = text.strip().replace(",", ".")
+    """Parse a numeric field, tolerating thousands separators, decimal commas
+    and trailing units such as ``2.5E-3 A``."""
+    text = (text or "").strip().strip('"\'')
     if not text:
         return None
+    text = text.replace(" ", "")
+    if "," in text:
+        if text.count(",") == 1 and "." not in text:
+            text = text.replace(",", ".")
+        else:
+            text = text.replace(",", "")
     try:
         return float(text)
     except ValueError:
-        return None
+        match = re.match(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except ValueError:
+            return None
+
+
+def _split_header(line):
+    """Split a header line and return (parts, separator)."""
+    for sep in ("\t", ",", ";"):
+        if sep in line:
+            return [part.strip() for part in line.split(sep)], sep
+    return line.split(), None
+
+
+def _split_row(line, sep):
+    """Split a data line using the header separator, falling back gracefully."""
+    if sep == "\t" and "\t" in line:
+        return line.split("\t")
+    if sep == "," and "," in line:
+        return line.split(",")
+    if sep == ";" and ";" in line:
+        return line.split(";")
+    if "\t" in line:
+        return line.split("\t")
+    if "," in line:
+        return line.split(",")
+    return line.split()
+
+
+def _current_unit(header_part):
+    """Return (factor to convert the column to mA, is_current_density)."""
+    part = header_part.lower()
+    density = any(tok in part for tok in ("cm-2", "cm2", "cm^2", "cm⁻²", "cm²", "/cm"))
+    if re.search(r"(?<![a-z])ma(?![a-z])", part):
+        return 1.0, density
+    if re.search(r"(?<![a-z])(?:ua|µa|μa)(?![a-z])", part):
+        return 0.001, density
+    if re.search(r"(?<![a-z])a(?![a-z])", part):
+        return 1000.0, density
+    return None, density
+
+
+def _find_header(lines):
+    """Locate the column header row and map potential/current columns."""
+    for idx, line in enumerate(lines[:200]):
+        low = line.lower()
+        if not (_E_HEADER_PATTERN.search(low) and _I_HEADER_PATTERN.search(low)):
+            continue
+        parts, sep = _split_header(line)
+        e_col = None
+        i_col = None
+        for ci, part in enumerate(parts):
+            pl = part.lower()
+            if e_col is None and _E_HEADER_PATTERN.search(pl):
+                e_col = ci
+            if i_col is None and _I_HEADER_PATTERN.search(pl):
+                i_col = ci
+        if e_col is None or i_col is None or e_col == i_col:
+            continue
+        factor, density = _current_unit(parts[i_col])
+        if factor is None:
+            factor = 1.0
+        return {
+            "start": idx + 1,
+            "e_col": e_col,
+            "i_col": i_col,
+            "factor": factor,
+            "density": density,
+            "sep": sep,
+        }
+    return None
 
 
 def read_lsv(path):
-    """Read an EC-Lab style LSV file.
+    """Read an LSV text file from a CHI, EC-Lab/BioLogic or similar workstation.
+
+    The parser is format tolerant: it scans past any leading measurement
+    information, accepts comma/tab/semicolon/space separated columns, maps the
+    potential and current columns by their header names, and converts A / µA
+    to mA.  Files without a header are read as "column 1 = potential,
+    column 2 = current" (mA) after a warning.
 
     Returns (E list, I list in mA, current_is_density).
     """
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        lines = fh.read().splitlines()
+    lines = _read_lines(path)
+    header = _find_header(lines)
 
-    e_col = 0
-    i_col = 1
-    current_in_mA = True
-    current_is_density = False
-    data_start = 0
+    if header is None:
+        head = "\n".join(lines[:15]).lower()
+        if "impedance" in head or "a.c. " in head:
+            return [], [], False
+        print("警告：未找到表头，按“第 1 列=电位，第 2 列=电流(mA)”解析：%s" % path)
+        header = {"start": 0, "e_col": 0, "i_col": 1, "factor": 1.0,
+                  "density": False, "sep": None}
 
-    for idx, line in enumerate(lines[:20]):
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        joined = line.lower()
-        if "ewe" not in joined and "potential" not in joined and "current" not in joined and "<i>" not in joined and "i/" not in joined:
-            continue
-        for ci, part in enumerate(parts):
-            pl = part.lower()
-            if "ewe" in pl or "potenti" in pl or pl.startswith("e/"):
-                e_col = ci
-            if "<i>" in pl or "current" in pl or pl.startswith("i/") or pl.startswith("i("):
-                i_col = ci
-                if "ma" in pl:
-                    current_in_mA = True
-                    current_is_density = ("/cm" in pl or "cm-2" in pl or "cm2" in pl)
-                elif "/a" in pl or pl == "<i>":
-                    current_in_mA = False
-        data_start = idx + 1
-        break
+    e_col = header["e_col"]
+    i_col = header["i_col"]
+    factor = header["factor"]
+    sep = header["sep"]
+    need = max(e_col, i_col)
 
     E = []
     I = []
-    for line in lines[data_start:]:
-        parts = line.split()
-        if len(parts) <= max(e_col, i_col):
+    for line in lines[header["start"]:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = _split_row(stripped, sep)
+        if len(parts) <= need:
             continue
         e = parse_number(parts[e_col])
         i = parse_number(parts[i_col])
         if e is None or i is None:
             continue
+        if math.isnan(e) or math.isnan(i) or math.isinf(e) or math.isinf(i):
+            continue
         E.append(e)
-        I.append(i)
+        I.append(i * factor)
 
-    if not current_in_mA:
-        I = [v * 1000.0 for v in I]
-    return E, I, current_is_density
+    return E, I, header["density"]
+
+
+def _longest_monotonic_run(E, I):
+    """Return the longest strictly monotonic (increasing or decreasing) run.
+
+    LSV files normally contain one sweep, but pre-scans or reverse segments can
+    make the potential direction flip.  Keeping the longest run removes those
+    fragments without assuming an ascending OER sweep, so descending HER scans
+    work too.
+    """
+    if len(E) < 2:
+        return list(E), list(I)
+
+    steps = sorted(abs(E[k] - E[k - 1]) for k in range(1, len(E)) if E[k] != E[k - 1])
+    median_step = steps[len(steps) // 2] if steps else 0.0
+    # A jump much larger than the normal sampling step is a pre-scan / new
+    # segment boundary, not part of the same sweep.
+    gap = max(median_step * 10.0, 0.05)
+
+    runs = []
+    cur_e = [E[0]]
+    cur_i = [I[0]]
+    direction = 0
+    for k in range(1, len(E)):
+        delta = E[k] - cur_e[-1]
+        if delta == 0:
+            continue
+        new_direction = 1 if delta > 0 else -1
+        if abs(delta) > gap:
+            runs.append((cur_e, cur_i))
+            cur_e = [E[k]]
+            cur_i = [I[k]]
+            direction = new_direction
+        elif direction == 0 or new_direction == direction:
+            cur_e.append(E[k])
+            cur_i.append(I[k])
+            direction = new_direction
+        else:
+            runs.append((cur_e, cur_i))
+            cur_e = [cur_e[-1], E[k]]
+            cur_i = [cur_i[-1], I[k]]
+            direction = new_direction
+    runs.append((cur_e, cur_i))
+    return max(runs, key=lambda run: len(run[0]))
 
 
 def clean_forward_sweep(E, I, e_min=1.3):
-    """Keep only the forward sweep: drop pre-scan idle points below e_min,
-    then start at the minimum remaining potential and keep strictly increasing E."""
+    """Keep the main sweep.
+
+    ``e_min`` preserves the historical selection-workflow convention: drop
+    points below it (OER pre-scan), then start from the minimum potential.
+    Pass ``e_min=None`` to detect the sweep direction automatically, which is
+    what the "plot every file" mode does; that also supports descending HER
+    scans and low-potential data.
+    """
     if not E:
         return [], []
-    E0 = []
-    I0 = []
-    for e, i in zip(E, I):
-        if e >= e_min:
-            E0.append(e)
-            I0.append(i)
-    if not E0:
-        return [], []
-    start = min(range(len(E0)), key=lambda k: E0[k])
-    E2 = []
-    I2 = []
-    last = -math.inf
-    for e, i in zip(E0[start:], I0[start:]):
-        if e > last:
-            E2.append(e)
-            I2.append(i)
-            last = e
-    return E2, I2
+    if e_min is not None:
+        E0 = []
+        I0 = []
+        for e, i in zip(E, I):
+            if e >= e_min:
+                E0.append(e)
+                I0.append(i)
+        if not E0:
+            return [], []
+        start = min(range(len(E0)), key=lambda k: E0[k])
+        E, I = E0[start:], I0[start:]
+    return _longest_monotonic_run(E, I)
 
 
 def potential_at_current(E, j, target):
@@ -217,7 +361,6 @@ def main(argv=None):
     parser.add_argument("--output-dir", help="输出 CSV 的目录")
     parser.add_argument("--no-best", action="store_true", help="跳过最优曲线选择")
     parser.add_argument("--pick", action="append", default=[], help="目录=文件名，或 目录#直接测=文件名 / 目录#iR补偿=文件名，可重复指定")
-    parser.add_argument("--eta10-gap", type=float, default=5.0, help="eta10 与次优差距超过该值（mV）时不自动选")
     parser.add_argument("--sanity-mv", type=float, default=0.0, help="过电位低于该值（mV）视为异常曲线")
     args = parser.parse_args(argv)
 

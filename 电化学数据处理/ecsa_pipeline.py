@@ -27,6 +27,7 @@ if SCRIPT_DIR not in sys.path:
 
 import ecsa_analysis
 import ecsa_plot
+from output_utils import next_output_dir
 
 
 def load_area(config_path):
@@ -186,7 +187,8 @@ def run_stages(args, ecsa_out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ECSA/Cdl 一键：选择 → selected_cv → Cdl 拟合与图")
     parser.add_argument("--input-dir", required=True, help="父目录，每个子文件夹为一个样品")
-    parser.add_argument("--output-dir", default=None, help="输出根目录（默认 output/<输入目录名>_0）")
+    parser.add_argument("--output-dir", default=None,
+                        help="输出根目录；不填时自动新建 output/<输入目录名>_<序号>，不覆盖旧结果")
     parser.add_argument("--config", default=os.path.join(SCRIPT_DIR, "config.yaml"))
     parser.add_argument("--area", type=float, default=None, help="电极面积 cm2，默认读 config.yaml")
     parser.add_argument("--pick", action="append", default=[], help='样品名=文件名#圈号，可重复')
@@ -200,31 +202,27 @@ def main(argv=None):
         args.area = load_area(args.config)
     if args.output_dir:
         output_root = os.path.abspath(args.output_dir)
+        base_root = re.sub(r"_\d+$", "", output_root)
     else:
-        base = os.path.basename(args.input_dir.rstrip("\\/"))
-        output_root = os.path.join(SCRIPT_DIR, "output", "%s_0" % base)
+        base = os.path.join(SCRIPT_DIR, "output",
+                            os.path.basename(args.input_dir.rstrip("\\/")))
+        output_root = next_output_dir(base)
+        base_root = base
 
     ecsa_out = os.path.join(output_root, "ecsa")
     try:
         ok = run_stages(args, ecsa_out)
         return 0 if ok else 1
     except PermissionError:
-        m = re.search(r"_(\d+)$", output_root)
-        if m:
-            base_root = output_root[:m.start()]
-            n = int(m.group(1)) + 1
-        else:
-            base_root = output_root
-            n = 0
         while True:
-            fallback = "%s_%d" % (base_root, n)
+            fallback = next_output_dir(base_root)
             print("\n输出目录被占用（可能是 CSV 正被打开），自动改用：%s" % fallback)
             ecsa_fallback = os.path.join(fallback, "ecsa")
             try:
                 ok = run_stages(args, ecsa_fallback)
                 return 0 if ok else 1
             except PermissionError:
-                n += 1
+                continue
 
 
 if __name__ == "__main__":
