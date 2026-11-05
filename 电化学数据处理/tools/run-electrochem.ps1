@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("LSV", "LSV+Tafel", "Plot")]
+    [ValidateSet("LSV", "LSV+Tafel", "Plot", "Compare")]
     [string]$Task,
     [string]$InputDir = "",
     [string[]]$Pick = @()
@@ -14,6 +14,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $outputRoot = Join-Path $root "output"
 $lsvPipeline = Join-Path $root "lsv_pipeline.py"
 $lsvPlot = Join-Path $root "lsv_plot.py"
+$lsvCompare = Join-Path $root "lsv_compare_direct.py"
 $tafelPlot = Join-Path $root "tafel_plot.py"
 
 $localDeps = Join-Path $root "py_deps"
@@ -243,6 +244,35 @@ if ($Task -eq "Plot") {
         exit 1
     }
     Show-ResultPath -Path $plotDir
+    exit 0
+}
+
+if ($Task -eq "Compare") {
+    $compareDir = Join-Path $outDir "对比图"
+    Write-Step "LSV：直接生成对比图（不选线，每个顶层文件夹一张）"
+    Write-Host "电位基准："
+    Write-Host "  [1] 数据已经是 vs RHE（默认）"
+    Write-Host "  [2] Hg/HgO，1 M KOH（E_RHE = E + 0.924 V）"
+    $refChoice = Read-Host "选择 1 或 2（直接回车=1）"
+    if ($null -eq $refChoice) { $refChoice = "1" }
+    $refChoice = $refChoice.Trim()
+    if ($refChoice -eq "2") {
+        $shift = "0.924"
+    } else {
+        $shift = "0.0"
+    }
+    $compareArgs = @(
+        $lsvCompare,
+        "--input-dir", $inputDir,
+        "--output-dir", $compareDir,
+        "--erhe-shift", $shift
+    )
+    $compareRc = Invoke-Python -Arguments $compareArgs
+    if ($compareRc -ne 0) {
+        Write-Problem "对比图生成失败，请检查窗口里的报错。"
+        exit 1
+    }
+    Show-ResultPath -Path $compareDir
     exit 0
 }
 

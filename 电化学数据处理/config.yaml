@@ -60,6 +60,15 @@ legend:
   loc: upper left
   fontsize: 10
 
+# ---------------- 对比图配色 ----------------
+# 只影响“一键LSV对比”和 lsv_compare_direct.py。
+# order 是图例顺序；colors 按样品名匹配，没配到的用默认色。
+series:
+  order: ["Pt", "Ni"]
+  colors:
+    Pt: "#1f77b4"
+    Ni: "#d62728"
+
 # ---------------- Tafel ----------------
 # 只影响“选线+LSV画图+Tafel”。
 
