@@ -1,0 +1,144 @@
+# ============================================================
+# 电化学数据处理配置 · 不要描边版（线宽 1.8，配色 Ru 绿 / 3% 红 / 4.5% 蓝）
+#
+# 一般只需要看“常用设置”这几项，其余保持默认即可。
+# 改完保存，下一次运行生效；不需要重启电脑。
+# ============================================================
+
+# ---------------- 常用设置 ----------------
+
+# 电极面积，单位 cm2。
+# 只有“除以面积算电流密度”时用到；只画图入口默认画原始电流 mA，不受这里影响。
+area: 1.0
+
+# 过电位基准：过电位 = 电位 - rhe，单位 V。
+# 数据本身已经是 vs RHE 时保持 1.23；如果数据是 vs 其它参比，这里不能直接当换算用。
+rhe: 1.23
+
+# 目标电流密度，单位 mA/cm2。
+# 第一个算 η10，第二个算 η100；顺序不要反。
+targets: [10.0, 100.0]
+
+# ---------------- 选线流程 ----------------
+# 只影响“选线+LSV画图”和“选线+LSV画图+Tafel”，不影响“一键LSV画图”。
+
+compare:
+  # 过电位低于该值（mV）时，把曲线标记为“异常”。
+  sanity_mv: 0.0
+  # 对比图里，η10 比组内中位数高超过该值（mV）的样品自动剔除。
+  exclude_mv: 100.0
+  # 超过这个比例的曲线达到 η100 时，对比图 y 轴用 0-100；否则用 0-10。
+  majority_ratio: 0.5
+  # 对比图横轴终点在数据末端之外多留的电位（V）。
+  x_end_pad: 0.01
+  # 手动指定对比分组，一般留空。写法见 README。
+  manual_groups: []
+
+# ---------------- 画图外观 ----------------
+# 一般不用改。
+
+figure:
+  dpi: 600          # 分辨率，期刊一般 600
+  font: Arial       # 英文字体；中文标题会自动用微软雅黑
+  figsize: [8.0, 6.0]  # 图片宽高，英寸
+
+curve:
+  linewidth: 1.8
+  marker: none
+  edge_color: null         # 描边颜色；null 表示不描边
+  edge_width: 0.6          # 描边向外加宽量
+
+# 选线流程的样品图/对比图坐标设置。
+# “一键LSV画图”会按数据自动取范围，不用这里的 x_min。
+axis:
+  xlabel: "Potential (V vs. RHE)"
+  ylabel: "Current density (mA·cm$^{-2}$)"
+  x_min: 1.4
+  x_major_step: 0.05
+  x_minor_step: 0.025
+  fontweight: bold
+
+# 对比图里横穿全图的 j = 10 mA/cm2 参考虚线与 η10 标注。
+# 只在对比图里画；样品图不受影响。标的是当前最左边（性能最好）那条曲线的 η10。
+eta_marker:
+  enabled: true
+  j: 10.0               # 虚线所在的电流密度
+  label: '$\eta_{10}={eta:.1f}\ \mathrm{mV}$'   # {eta} 会替换成 η10 数值；单引号写法避免转义
+  color: "#000000"      # 标注文字颜色（纯黑）
+  line_color: "#808080" # 虚线颜色（保持灰色，想变黑就改成 "#000000"）
+  linewidth: 1.0
+  dash: [6.0, 4.0]      # 虚线段长、间隔（点数）
+  # 字号 / 字体默认继承图例（legend.fontsize、figure.font），不加粗；
+  # 只有这里显式写了才覆盖。
+  fontsize: 10
+  font:
+    fontweight: normal
+  # 定位规则：把标注当成一个方框，方框的「右下角」对齐
+  # 「最左曲线与虚线的交点」，所以文字整体落在交点左上方、紧贴虚线上方。
+  # 想手动钉位置就填 x / y（轴内比例 0-1，x 表示方框左边、y 表示方框中线）。
+  x: null
+  y: null
+  dx_pt: 0              # 方框右下角相对交点的横向点偏移（负=往左让开曲线）
+  y_offset_pt: 2        # 方框右下角相对虚线的纵向点偏移（正=抬到虚线上方）
+
+legend:
+  loc: upper left
+  fontsize: 10
+  frameon: false        # 图例不要外框描边
+
+# ---------------- Tafel ----------------
+# 只影响“选线+LSV画图+Tafel”。
+
+tafel:
+  xlabel: "log(j / mA cm$^{-2}$)"
+  ylabel: "Overpotential $\\eta$ (mV)"
+  x_major_step: 1.0
+  x_minor_step: 0.5
+  y_major_step: 50.0
+  y_minor_step: 10.0
+  # 截取版 Tafel 图的电流密度下限；j_max / eta_min / eta_max 为 null 表示不限制。
+  j_min: 1.0
+  j_max: null
+  eta_min: null
+  eta_max: null
+  # 自动拟合：只拟合过电位不低于该值（mV）的正电流段。
+  fit_eta_min_mv: 50.0
+  # 滑动窗口宽度（多少个数量级）。
+  fit_window_decades: 1.0
+  # 低于该 R² 时只给人工复核警告，不中断流程。
+  fit_r2_min: 0.99
+  # 合理的 Tafel 斜率范围（mV/dec）；超出范围会换下一个候选窗口。
+  fit_slope_min_mv_dec: 30.0
+  fit_slope_max_mv_dec: 200.0
+  # 对比图里把斜率标在曲线旁时，向上偏移的点数
+  slope_label_offset_pt: 10
+  fontweight: bold
+
+# ---------------- ECSA / Cdl ----------------
+# 只影响 ecsa_*.py 命令行模块。
+
+ecsa:
+  center_potential: null   # 固定中心电位；null 表示自动推荐
+  cs_uf_cm2: null          # 已知比电容；null 表示只算 Cdl
+  score_gap: 0.002
+  max_manual_candidates: 3
+  cv:
+    xlabel: "E (V vs. Hg/HgO)"
+    ylabel: "Current density (mA·cm$^{-2}$)"
+    x_major_step: 0.05
+    x_minor_step: 0.025
+    fontweight: bold
+  fit:
+    xlabel: "$v$ / (mV s$^{-1}$)"
+    ylabel: "$\\Delta j$ (mA cm$^{-2}$)"
+    fontweight: bold
+
+# ---------------- 系列顺序与配色（对比图） ----------------
+# 图例从上到下 = order 的顺序；颜色按样品名匹配。
+# 没配到的样品保持原顺序、用 matplotlib 默认色。
+series:
+  order: ["Ru", "3%", "4.5%"]
+  colors:
+    Ru: "#00ff00"
+    "3%": "#ff0000"
+    "4.5%": "#0000ff"

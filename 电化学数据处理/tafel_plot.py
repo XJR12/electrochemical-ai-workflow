@@ -23,10 +23,13 @@ import os
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FormatStrFormatter, MultipleLocator
 import numpy as np
 import yaml
+
+from series_style import color_of, sort_curves
 
 from lsv_analysis import clean_forward_sweep, group_kind, read_lsv
 
@@ -80,6 +83,7 @@ def load_config(path):
             continue
         merged[section] = {**default, **(cfg.get(section) or {})}
     merged["compare"] = cfg.get("compare") or {}
+    merged["series"] = cfg.get("series") or {}
     merged["area"] = cfg.get("area", DEFAULTS.get("area", 1.0))
     return merged
 
@@ -278,25 +282,60 @@ def attach_fit_results(curves, tafel_cfg, notes):
             notes.append("Tafel 拟合警告：%s（%s）" % (fit["warning"], name))
 
 
-def save_tafel_figure(curves, out_path, cfg, notes, fit_mode=False):
+def _apply_edge(line, cfg):
+    """给曲线加描边：在黑线外套一层 edge_color，形成轮廓。"""
+    curve = (cfg or {}).get("curve") or {}
+    edge = curve.get("edge_color")
+    if not edge:
+        return
+    width = float(curve.get("linewidth", 2.0)) + float(curve.get("edge_width", 0.6))
+    line.set_path_effects([pe.Stroke(linewidth=width, foreground=edge), pe.Normal()])
+
+
+def _annotate_slopes(ax, items, cfg, color_by_curve=True, offset_pt=None):
+    """把 Tafel 斜率沿拟合线标出，字号与图例一致；默认颜色跟曲线走。"""
+    size = cfg["legend"]["fontsize"]
+    offset = float(cfg["tafel"].get("slope_label_offset_pt", 10) if offset_pt is None else offset_pt)
+    for fit, c in items:
+        if not fit.get("ok"):
+            continue
+        x0, x1 = fit["x0"], fit["x1"]
+        y0 = fit["slope"] * x0 + fit["intercept"]
+        y1 = fit["slope"] * x1 + fit["intercept"]
+        xm, ym = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        p0 = ax.transData.transform((x0, y0))
+        p1 = ax.transData.transform((x1, y1))
+        angle = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
+        if color_by_curve:
+            color = color_of(cfg, c.get("folder", "")) or "#000000"
+        else:
+            color = "#000000"
+        ax.annotate("%.1f mV dec$^{-1}$" % fit["slope"], xy=(xm, ym),
+                    xytext=(0, offset), textcoords="offset points",
+                    rotation=angle, rotation_mode="anchor",
+                    ha="center", va="bottom", fontsize=size, color=color,
+                    zorder=6)
+
+
+def save_tafel_figure(curves, out_path, cfg, notes, fit_mode=False, overlay=False):
     fig, ax = plt.subplots(figsize=cfg["figure"]["figsize"], dpi=cfg["figure"]["dpi"])
     fitted_lines = []
+    slope_notes = []
     if fit_mode:
         no_fit = []
         for c in curves:
             fit = c.get("tafel_fit") or {}
             if fit.get("ok"):
                 label = c["label"]
-                if len(curves) > 1:
-                    label = "%s (%.1f mV/dec, R²=%.4f)" % (
-                        label, fit["slope"], fit["r2"]
-                    )
+                slope_notes.append((fit, c))
                 y0 = fit["slope"] * fit["x0"] + fit["intercept"]
                 y1 = fit["slope"] * fit["x1"] + fit["intercept"]
-                ax.plot(
+                line, = ax.plot(
                     [fit["x0"], fit["x1"]], [y0, y1],
                     linewidth=cfg["curve"]["linewidth"], label=label,
+                    color=color_of(cfg, c["folder"]),
                 )
+                _apply_edge(line, cfg)
                 fitted_lines.append((fit["x0"], fit["x1"], y0, y1))
             elif len(curves) > 1:
                 no_fit.append(c["label"] + " (no fit)")
@@ -304,11 +343,19 @@ def save_tafel_figure(curves, out_path, cfg, notes, fit_mode=False):
             ax.plot([], [], color="none", label=label)
     else:
         for c in curves:
-            ax.plot(
+            line, = ax.plot(
                 c["logj"], c["eta"], linewidth=cfg["curve"]["linewidth"],
                 marker=cfg["curve"]["marker"], label=c["label"],
+                color=color_of(cfg, c["folder"]),
             )
+            _apply_edge(line, cfg)
 
+    if overlay:
+        # 全曲线（细一点、半透明）打底，再把拟合线和斜率标签叠上去
+        for c in curves:
+            if len(c.get("logj", [])) >= 2:
+                ax.plot(c["logj"], c["eta"], linewidth=max(0.8, cfg["curve"]["linewidth"] * 0.6),
+                        color=color_of(cfg, c["folder"]), alpha=0.35, zorder=1)
     if fit_mode and fitted_lines:
         xmin = min(item[0] for item in fitted_lines)
         xmax = max(item[1] for item in fitted_lines)
@@ -321,6 +368,12 @@ def save_tafel_figure(curves, out_path, cfg, notes, fit_mode=False):
         xmax = max(max(c["logj"]) for c in curves)
         ymin = min(min(c["eta"]) for c in curves)
         ymax = max(max(c["eta"]) for c in curves)
+    if overlay:
+        # 视野覆盖整条 Tafel 曲线，不只看拟合窗口
+        xmin = min(xmin, min(min(c["logj"]) for c in curves))
+        xmax = max(xmax, max(max(c["logj"]) for c in curves))
+        ymin = min(ymin, min(min(c["eta"]) for c in curves))
+        ymax = max(ymax, max(max(c["eta"]) for c in curves))
     pad_x = max((xmax - xmin) * 0.05, 0.1)
     pad_y = max((ymax - ymin) * 0.05, 5.0)
     ax.set_xlim(xmin - pad_x, xmax + pad_x)
@@ -337,7 +390,18 @@ def save_tafel_figure(curves, out_path, cfg, notes, fit_mode=False):
     ax.yaxis.set_minor_locator(MultipleLocator(cfg["tafel"]["y_minor_step"]))
     ax.yaxis.set_major_formatter(FormatStrFormatter("%.0f"))
     ax.legend(loc=cfg["legend"]["loc"], fontsize=cfg["legend"]["fontsize"],
-              frameon=True, edgecolor="black")
+              frameon=bool(cfg["legend"].get("frameon", True)),
+              edgecolor="black")
+
+    if fit_mode and len(curves) > 1:
+        if overlay:
+            # 全图版里曲线挨得近，标签错开一点并统一黑色，避免互相压住
+            slope_notes = sorted(slope_notes, key=lambda item: item[0]["slope"])
+            for i, item in enumerate(slope_notes):
+                _annotate_slopes(ax, [item], cfg, color_by_curve=False,
+                                 offset_pt=float(cfg["tafel"].get("slope_label_offset_pt", 10)) + 10.0 * i)
+        else:
+            _annotate_slopes(ax, slope_notes, cfg, color_by_curve=True)
 
     if fit_mode and len(curves) == 1:
         fit = curves[0].get("tafel_fit") or {}
@@ -367,6 +431,11 @@ def save_tafel_versions(curves, out_dir, stem, cfg, notes):
         save_tafel_figure(
             full, os.path.join(out_dir, stem + "-斜率拟合.png"), cfg, notes,
             fit_mode=True,
+        )
+        # 和上面同一套拟合窗口，但画在整条曲线上（不被 j_min 截掉）
+        save_tafel_figure(
+            full, os.path.join(out_dir, stem + "-斜率全图.png"), cfg, notes,
+            fit_mode=True, overlay=True,
         )
 
     crops = [filter_curve(c, cfg["tafel"]) for c in curves]
@@ -604,7 +673,7 @@ def run_best_csv(input_dir, best_csv, output_dir, cfg, area, rhe, notes):
         print("lsv_best.csv 中没有可用的 iR Tafel 数据。")
         return False
 
-    curves.sort(key=lambda c: c["folder"])
+    curves = sort_curves(curves, cfg)
     sample_dir = os.path.join(output_dir, "样品")
     for c in curves:
         save_tafel_versions([c], sample_dir, "Tafel-%s" % c["stem"], cfg, notes)

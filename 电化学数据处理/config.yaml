@@ -59,6 +59,7 @@ axis:
 legend:
   loc: upper left
   fontsize: 10
+  frameon: false        # 图例不要外框描边
 
 # ---------------- Tafel ----------------
 # 只影响“选线+LSV画图+Tafel”。
@@ -84,6 +85,8 @@ tafel:
   # 合理的 Tafel 斜率范围（mV/dec）；超出范围会换下一个候选窗口。
   fit_slope_min_mv_dec: 30.0
   fit_slope_max_mv_dec: 200.0
+  # 对比图里把斜率标在曲线旁时，向上偏移的点数
+  slope_label_offset_pt: 10
   fontweight: bold
 
 # ---------------- ECSA / Cdl ----------------
@@ -104,3 +107,13 @@ ecsa:
     xlabel: "$v$ / (mV s$^{-1}$)"
     ylabel: "$\\Delta j$ (mA cm$^{-2}$)"
     fontweight: bold
+
+# ---------------- 系列顺序与配色（对比图） ----------------
+# 图例从上到下 = order 的顺序；颜色按样品名匹配。
+# 没配到的样品保持原顺序、用 matplotlib 默认色。
+series:
+  order: ["Ru", "3%", "4.5%"]
+  colors:
+    Ru: "#00ff00"
+    "3%": "#ff0000"
+    "4.5%": "#0000ff"
